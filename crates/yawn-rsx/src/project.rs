@@ -145,6 +145,30 @@ pub fn uses_routes(root: &Path) -> bool {
     folders_enabled(root) && find_sources(root).iter().any(|s| s.starts_with("routes/"))
 }
 
+/// URLs of the pages in `src/routes/` without parameters, the ones a static build renders by itself
+pub fn static_pages(root: &Path) -> Vec<String> {
+    if !folders_enabled(root) {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = find_sources(root)
+        .iter()
+        .filter_map(|rel| {
+            let stem = rel.strip_suffix(".rsx").filter(|s| s.starts_with("routes/"))?;
+            let route = crate::routes::analyze(stem, "_").ok()?;
+            let crate::routes::Kind::Page(page) = route.kind else { return None };
+            let mut segs = route.dirs;
+            segs.extend(page.split('/').filter(|s| !s.is_empty()).map(str::to_string));
+            if segs.iter().any(|s| s.starts_with([':', '*'])) {
+                return None;
+            }
+            Some(format!("/{}", segs.join("/")))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn out_dir(root: &Path) -> PathBuf {
     root.join(OUT_DIR)
 }
@@ -779,6 +803,33 @@ mod path_mod_tests {
         assert_eq!(generated_stem(&root, "ui/card"), "ui/card");
         fs::write(root.join("Yawn.toml"), "[router]\nfolders = false\n").unwrap();
         assert_eq!(generated_stem(&root, "routes/users/[id]"), "routes/users/[id]");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn static_pages_are_the_routes_without_parameters() {
+        let root = std::env::temp_dir().join(format!("yawn-rsx-static-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for f in [
+            "main.rsx",
+            "ui/card.rsx",
+            "routes/index.rsx",
+            "routes/about.rsx",
+            "routes/layout.rsx",
+            "routes/not_found.rsx",
+            "routes/users/index.rsx",
+            "routes/users/[id].rsx",
+            "routes/users/[id]/edit.rsx",
+            "routes/(docs)/guide.rsx",
+            "routes/files/[...path].rsx",
+        ] {
+            let path = root.join("src").join(f);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+        }
+        assert_eq!(static_pages(&root), ["/", "/about", "/guide", "/users"]);
+        fs::write(root.join("Yawn.toml"), "[router]\nfolders = false\n").unwrap();
+        assert!(static_pages(&root).is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 

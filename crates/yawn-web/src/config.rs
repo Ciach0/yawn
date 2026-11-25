@@ -77,6 +77,9 @@ pub struct BuildSection {
     /// Directories copied into `dist/` under their own name, relative to the project root (they may
     /// lie outside it, `../translations`)
     pub copy: Vec<String>,
+    /// Pages `yawn build --static` renders besides the ones in `src/routes/` without parameters:
+    /// `["/users/1", "/docs/intro"]`
+    pub prerender: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

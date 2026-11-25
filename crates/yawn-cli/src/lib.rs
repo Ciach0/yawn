@@ -22,6 +22,7 @@ pub mod finalize;
 pub mod new;
 pub mod output;
 pub mod pipeline;
+pub mod prerender;
 pub mod session;
 pub mod state;
 pub mod tui;
