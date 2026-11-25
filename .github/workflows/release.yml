@@ -44,7 +44,7 @@ jobs:
           if [ "${{ runner.os }}" = Windows ]; then
             7z a "$name.zip" "./$out/yawn.exe"
           else
-            tar -czf "$name.tar.gz" -C "$out" yawn
+            tar -czf "$name.tgz" -C "$out" yawn
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -74,7 +74,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: |
-          for crate in yawn-reactivity yawn-rsx yawn-web yawn-router yawn-kit yawn-lsp yawn-cli; do
-            cargo publish --locked -p "$crate"
-          done
+      - run: cargo publish --workspace --locked
