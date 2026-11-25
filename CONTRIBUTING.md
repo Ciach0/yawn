@@ -5,8 +5,8 @@ we can agree on the direction.
 
 ## Setup
 
-You need Rust (see `rust-version` in `Cargo.toml`), the `wasm32-unknown-unknown` target, and for the
-example a `wasm-bindgen` CLI that matches the version in `Cargo.lock`.
+You need Rust (see `rust-version` in `Cargo.toml`) and the `wasm32-unknown-unknown` target. `yawn`
+downloads the `wasm-bindgen` CLI matching the example's `Cargo.lock` when the one on `PATH` doesn't.
 
 ```sh
 rustup target add wasm32-unknown-unknown

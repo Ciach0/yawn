@@ -1,10 +1,12 @@
 pub mod cargo;
 pub mod changes;
+pub mod fetch;
 mod literals;
 pub mod loading;
 pub mod project;
 pub mod rsx;
 pub mod tailwind;
+pub mod wasm_bindgen;
 
 use crate::build::{CLIENT_TARGET_DIR, SERVER_TARGET_DIR};
 use crate::event::{BuildEvent, Event, Level, Location, LogEvent, fmt_duration};
@@ -108,7 +110,7 @@ struct Dev {
     last_progress: std::cell::Cell<Option<Instant>>,
     saves: HashMap<u64, Instant>,
     last_error: Option<String>,
-    bindgen_checked: bool,
+    bindgen: Option<std::path::PathBuf>,
     literal_baseline: Option<literals::Snapshot>,
     literal_patch: bool,
     _watcher: Option<RecommendedWatcher>,
@@ -145,7 +147,7 @@ impl Dev {
             last_progress: std::cell::Cell::new(None),
             saves: HashMap::new(),
             last_error: None,
-            bindgen_checked: false,
+            bindgen: None,
             literal_baseline: None,
             literal_patch: false,
             _watcher: None,
@@ -958,27 +960,15 @@ impl Dev {
     }
 
     fn bindgen(&mut self, wasm: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
-        if !self.bindgen_checked {
-            let version = Command::new("wasm-bindgen").arg("--version").output().map_err(|_| {
-                "wasm-bindgen not found. Install it: cargo install wasm-bindgen-cli".to_string()
-            })?;
-            let have = String::from_utf8_lossy(&version.stdout)
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
-            if let Some(want) = config::locked_version(&self.project.root, "wasm-bindgen")
-                && want != have
-            {
-                return Err(format!(
-                    "wasm-bindgen CLI {have} does not match the project's wasm-bindgen {want}. Fix: cargo install -f wasm-bindgen-cli --version {want}"
-                ));
-            }
-            self.bindgen_checked = true;
+        if self.bindgen.is_none() {
+            let log = |m: &str| {
+                self.sink.log(Level::Info, "wasm-bindgen", m);
+            };
+            self.bindgen = Some(wasm_bindgen::resolve(&self.project.root, &log)?);
         }
         std::fs::create_dir_all(out)
             .map_err(|e| format!("cannot create {}: {e}", out.display()))?;
-        let mut cmd = Command::new("wasm-bindgen");
+        let mut cmd = Command::new(self.bindgen.as_ref().expect("just set"));
         cmd.args(["--target", "web", "--no-typescript", "--out-name", CLIENT_BUNDLE, "--out-dir"])
             .arg(out)
             .arg(wasm)

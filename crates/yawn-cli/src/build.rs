@@ -1,6 +1,6 @@
 use crate::cli::BuildArgs;
 use crate::dev::project::Project;
-use crate::dev::{rsx, tailwind::Tailwind};
+use crate::dev::{rsx, tailwind::Tailwind, wasm_bindgen};
 use crate::error::CliError;
 use crate::finalize;
 use std::path::{Path, PathBuf};
@@ -84,15 +84,15 @@ fn build_client(root: &Path, project: &Project, pkg: &Path) -> Result<(), CliErr
         return Err(CliError::new(format!("cargo built no {}", wasm.display()))
             .hint("the project needs a library (src/lib.rs, or src/main.rsx)"));
     }
-    let bindgen = Command::new("wasm-bindgen")
+    let log = |m: &str| eprintln!("      {m}");
+    let exe = wasm_bindgen::resolve(root, &log).map_err(CliError::new)?;
+    let bindgen = Command::new(&exe)
         .args(["--target", "web", "--no-typescript", "--out-name", "app", "--out-dir"])
         .arg(pkg)
         .arg(&wasm)
         .stdin(Stdio::null())
         .status()
-        .map_err(|_| {
-            CliError::new("wasm-bindgen not found").hint("cargo install wasm-bindgen-cli")
-        })?;
+        .map_err(|e| CliError::new(format!("cannot run {}: {e}", exe.display())))?;
     if !bindgen.success() {
         return Err(CliError::new(format!("wasm-bindgen failed ({bindgen})")));
     }

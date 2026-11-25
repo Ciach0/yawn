@@ -63,8 +63,8 @@ them into plain Rust files you can read.
 
 ## Quick start
 
-You need Rust with the `wasm32-unknown-unknown` target and a `wasm-bindgen` CLI that matches the
-project (`yawn dev` prints the exact install command if it doesn't).
+You need Rust with the `wasm32-unknown-unknown` target. `yawn` uses the `wasm-bindgen` CLI on your
+`PATH` when it matches the project, and otherwise downloads the matching release once into a cache.
 
 ```sh
 rustup target add wasm32-unknown-unknown
