@@ -46,7 +46,7 @@ webpki-roots = { version = "1", optional = true }
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "query"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "net", "io-util", "io-std", "sync", "time", "signal"] }
 tokio-stream = { version = "0.1", optional = true, features = ["sync", "time"] }
-tower-http = { version = "0.6", optional = true, features = ["fs", "set-header", "compression-gzip", "compression-br"] }
+tower-http = { version = "0.7", optional = true, features = ["fs", "set-header", "compression-gzip", "compression-br"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `enable-interning`: names the renderer passes to the DOM again and again (tags, attributes, events)
