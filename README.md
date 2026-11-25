@@ -58,7 +58,8 @@ them into plain Rust files you can read.
   `Cache-Control: immutable` for everything the browser can keep.
 - **Static sites.** `yawn build --static` renders the pages to `.html` for a static host: every
   route in `src/routes/` without parameters, plus the paths in `[build] prerender` of `Yawn.toml`
-  (`prerender = ["/users/1"]`). The data the pages load is saved next to them.
+  (`prerender = ["/users/1"]`). The data the pages load is saved next to them. It runs the
+  project's own server during the build to render them.
 - **Tailwind built in.** Tailwind v4 through its standalone executable.
 - **Editor support.** A language server for `.rsx` (rust-analyzer behind a source map, plus HTML,
   CSS and Tailwind completion), a tree-sitter grammar and a Zed extension.

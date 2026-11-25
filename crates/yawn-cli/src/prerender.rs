@@ -19,8 +19,8 @@ pub fn check_page(path: &str) -> Result<(), String> {
     if !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#']) {
         return Err(format!("[build] prerender: `{path}` must be a path like `/users/1`"));
     }
-    if path.split('/').any(|s| s == "." || s == "..") {
-        return Err(format!("[build] prerender: `{path}` cannot contain `.` or `..`"));
+    if path.contains('\\') || path.split('/').any(|s| s == "." || s == "..") {
+        return Err(format!("[build] prerender: `{path}` cannot contain `.`, `..` or `\\`"));
     }
     Ok(())
 }
@@ -148,21 +148,28 @@ pub fn run(
         if !url.starts_with('/') || url.starts_with("//") {
             continue; // another site: the browser fetches it from there
         }
-        if url.contains(['?', '#']) || url.ends_with('/') || url.split('/').any(|s| s == "..") {
+        if url.contains(['?', '#', '\\']) || url.ends_with('/') || url.split('/').any(|s| s == "..")
+        {
             eprintln!(
                 "      warning: {url} can't be a file on a static host; pages that read it get no data"
             );
             continue;
         }
         let file = public.join(url.trim_start_matches('/'));
-        if file.exists() {
+        if file.is_file() {
             continue; // an asset, already there
         }
+        if file.is_dir() {
+            eprintln!("      warning: {url} is also the folder of another data URL; not saved");
+            continue;
+        }
         match get(addr, url) {
-            Ok((200, body)) => {
-                write(&file, &body)?;
-                saved += 1;
-            }
+            Ok((200, body)) => match write(&file, &body) {
+                Ok(()) => saved += 1,
+                Err(_) => eprintln!(
+                    "      warning: {url} clashes with another data URL (a file and a folder with one name); not saved"
+                ),
+            },
             Ok((status, _)) => eprintln!("      warning: {url} answered {status}; not saved"),
             Err(e) => eprintln!("      warning: cannot fetch {url}: {e}"),
         }
@@ -178,7 +185,7 @@ mod tests {
     fn pages_are_checked() {
         assert!(check_page("/users/1").is_ok());
         assert!(check_page("/").is_ok());
-        for bad in ["users", "//evil.com", "/a?b=1", "/a#x", "/../etc", "/a/./b"] {
+        for bad in ["users", "//evil.com", "/a?b=1", "/a#x", "/../etc", "/a/./b", "/a\\..\\b"] {
             assert!(check_page(bad).is_err(), "{bad}");
         }
     }
