@@ -1,3 +1,4 @@
+use super::fetch;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -47,41 +48,6 @@ pub fn checksum_for(sums: &str, asset: &str) -> Option<String> {
     })
 }
 
-fn cache_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|h| PathBuf::from(h).join(".cache"))
-        })?;
-    Some(base.join("yawn").join("tailwind").join(VERSION))
-}
-
-fn run_ok(cmd: &mut Command) -> Result<String, String> {
-    let out = cmd
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run {:?}: {e}", cmd.get_program()))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(super::cargo::strip_ansi(String::from_utf8_lossy(&out.stderr).trim()))
-    }
-}
-
-fn sha256(file: &Path) -> Result<String, String> {
-    let try_tool = |prog: &str, args: &[&str]| {
-        run_ok(Command::new(prog).args(args).arg(file))
-            .ok()
-            .and_then(|o| o.split_whitespace().next().map(str::to_ascii_lowercase))
-    };
-    try_tool("sha256sum", &[]).or_else(|| try_tool("shasum", &["-a", "256"])).ok_or_else(|| {
-        "cannot verify the download: neither `sha256sum` nor `shasum` is available".to_string()
-    })
-}
-
 fn download(log: &dyn Fn(&str)) -> Result<PathBuf, String> {
     let asset = asset_name(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
         format!(
@@ -90,7 +56,8 @@ fn download(log: &dyn Fn(&str)) -> Result<PathBuf, String> {
             std::env::consts::ARCH
         )
     })?;
-    let dir = cache_dir().ok_or("cannot find a cache directory (set HOME or XDG_CACHE_HOME)")?;
+    let dir = fetch::cache_dir("tailwind", VERSION)
+        .ok_or("cannot find a cache directory (set HOME or XDG_CACHE_HOME)")?;
     let exe = dir.join(if cfg!(windows) { "tailwindcss.exe" } else { "tailwindcss" });
     if exe.is_file() {
         return Ok(exe);
@@ -100,24 +67,14 @@ fn download(log: &dyn Fn(&str)) -> Result<PathBuf, String> {
     log(&format!(
         "downloading tailwindcss v{VERSION} ({asset}) from github.com/tailwindlabs/tailwindcss, once"
     ));
-    let curl = |url: &str, to: Option<&Path>| {
-        let mut c = Command::new("curl");
-        c.args(["--fail", "--silent", "--show-error", "--location", "--max-time", "300"]);
-        match to {
-            Some(p) => c.arg("--output").arg(p),
-            None => c.arg("--output").arg("-"),
-        };
-        c.arg(url);
-        run_ok(&mut c).map_err(|e| {
-            format!("download failed ({e}); install curl, or set `[tailwind] binary` in Yawn.toml")
-        })
-    };
+    let curl =
+        |url: &str, to: Option<&Path>| fetch::curl(url, to, "set `[tailwind] binary` in Yawn.toml");
     let sums = curl(&format!("{base}/sha256sums.txt"), None)?;
     let want = checksum_for(&sums, &asset)
         .ok_or_else(|| format!("sha256sums.txt of v{VERSION} does not list {asset}"))?;
     let part = dir.join(format!("{asset}.part"));
     curl(&format!("{base}/{asset}"), Some(&part))?;
-    let got = sha256(&part)?;
+    let got = fetch::sha256(&part)?;
     if got != want {
         let _ = std::fs::remove_file(&part);
         return Err(format!(
