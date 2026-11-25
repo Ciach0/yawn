@@ -1,0 +1,20 @@
+[package]
+name = "counter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `src/main.rsx` is the entry point. `yawn dev` and `yawn rsx` generate the client (WASM) and the
+# native server from it into `.yawn/`; nothing to configure here.
+
+[dependencies]
+yawn-web = { path = "../../crates/yawn-web" }
+
+# Standalone project: not a member of the Yawn workspace.
+[workspace]
+
+[profile.dev]
+# Dev loop: a small wasm (about 0.9 MB instead of 8 MB) links, post-processes and loads faster,
+# which is most of the time between saving and seeing the change.
+debug = false
+opt-level = "s"

@@ -1,0 +1,6 @@
+[app]
+title = "Yawn counter"
+
+# Port: `yawn dev --port N` > $PORT > this value > 3000.
+# [server]
+# port = 3000

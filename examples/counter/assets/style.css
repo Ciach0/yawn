@@ -1,0 +1,41 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f6f4;
+  --fg: #1b1b1a;
+  --card: #ffffff;
+  --line: #deded8;
+  --accent: #2563eb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151514; --fg: #ecece8; --card: #1e1e1c; --line: #34342f; --accent: #6ea0ff; }
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 system-ui, sans-serif;
+}
+.card {
+  padding: 1.75rem 2.5rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  text-align: center;
+}
+.count { margin: 0 0 1rem; font-size: 4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.row { display: flex; gap: .5rem; justify-content: center; }
+.btn {
+  min-width: 3rem;
+  padding: .55rem 1rem;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

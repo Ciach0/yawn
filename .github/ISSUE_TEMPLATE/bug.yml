@@ -1,0 +1,17 @@
+name: Bug report
+description: Something does not work as documented
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. A minimal `.rsx` file helps most.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `yawn --version` and `rustc --version`
+    validations:
+      required: true

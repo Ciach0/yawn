@@ -1,0 +1,15 @@
+[package]
+name = "yawn-rsx"
+version.workspace = true
+edition.workspace = true
+description = "The .rsx compiler: parses Yawn .rsx files and generates Rust that drives yawn-web's fine-grained renderer"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+toml = "0.8"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "clone-impls"] }

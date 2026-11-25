@@ -1,0 +1,13 @@
+[package]
+name = "browser-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The app the browser benchmark drives (see ../README.md). `run.sh` copies it next to a snapshot of
+# the framework and points these paths at that snapshot.
+[dependencies]
+yawn-web = { path = "../../../crates/yawn-web" }
+
+# Standalone project: not a member of the Yawn workspace.
+[workspace]

@@ -1,0 +1,146 @@
+==================
+component with view and style
+==================
+use crate::x::Y;
+
+pub component Counter(step: Sig<i32>) {
+    let count = signal(0);
+    view {
+        <p class="a {count}" on:click={move || count.set(1)}>"n = {count}"</p>
+        <Stepper step={step} />
+        <input disabled>
+        if count.get() > 1 { <b>"x"</b> } else if true { <u>"z"</u> } else { <i>"y"</i> }
+        for x in xs.get() key x.id { <li>"{x}"</li> }
+    }
+    style { .a { color: red; } }
+}
+
+---
+
+(source_file
+  (rust_toplevel)
+  (component
+    name: (component_name)
+    (params
+      (param
+        name: (param_name)
+        type: (rust_type)))
+    (rust_setup)
+    (view_block
+      (start_tag
+        (tag_name)
+        (attribute
+          name: (attribute_name)
+          value: (string
+            (string_content)
+            (interpolation
+              (rust_expr))))
+        (attribute
+          name: (directive)
+          value: (expression
+            (rust_expr))))
+      (string
+        (string_content)
+        (interpolation
+          (rust_expr)))
+      (end_tag
+        (tag_name))
+      (self_closing_tag
+        (component_tag)
+        (attribute
+          name: (attribute_name)
+          value: (expression
+            (rust_expr))))
+      (start_tag
+        (tag_name)
+        (attribute
+          name: (attribute_name)))
+      (if_node
+        (rust_head)
+        (start_tag
+          (tag_name))
+        (string
+          (string_content))
+        (end_tag
+          (tag_name))
+        (else_clause
+          (if_node_nested
+            (rust_head)
+            (start_tag
+              (tag_name))
+            (string
+              (string_content))
+            (end_tag
+              (tag_name))
+            (else_clause
+              (start_tag
+                (tag_name))
+              (string
+                (string_content))
+              (end_tag
+                (tag_name))))))
+      (for_node
+        (rust_for_head)
+        (rust_head)
+        (start_tag
+          (tag_name))
+        (string
+          (interpolation
+            (rust_expr)))
+        (end_tag
+          (tag_name))))
+    (style_block
+      (css_content))))
+
+==================
+parameters with lifetimes, generics and closures
+==================
+component Wave(mut class: &'static str, rows: HashMap<String, Vec<u8>>, on_pick: Box<dyn Fn(u32) -> bool>,) {
+    view { <b /> }
+}
+
+---
+
+(source_file
+  (component
+    name: (component_name)
+    (params
+      (param
+        name: (param_name)
+        type: (rust_type))
+      (param
+        name: (param_name)
+        type: (rust_type))
+      (param
+        name: (param_name)
+        type: (rust_type)))
+    (view_block
+      (self_closing_tag
+        (tag_name)))))
+
+==================
+a bare component keyword does not swallow what follows
+==================
+use a::b;
+
+component
+
+pub component Card() {
+    view { <p>"x"</p> }
+}
+
+---
+
+(source_file
+  (rust_toplevel)
+  (ERROR)
+  (component
+    name: (component_name)
+    (params)
+    (view_block
+      (start_tag
+        (tag_name))
+      (string
+        (string_content))
+      (end_tag
+        (tag_name)))))
