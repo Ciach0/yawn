@@ -56,6 +56,9 @@ them into plain Rust files you can read.
   registration, and `yawn::http` calls it from the client.
 - **Production builds.** `yawn build` writes `dist/` with content-hashed file names and
   `Cache-Control: immutable` for everything the browser can keep.
+- **Static sites.** `yawn build --static` renders the pages to `.html` for a static host: every
+  route in `src/routes/` without parameters, plus the paths in `[build] prerender` of `Yawn.toml`
+  (`prerender = ["/users/1"]`). The data the pages load is saved next to them.
 - **Tailwind built in.** Tailwind v4 through its standalone executable.
 - **Editor support.** A language server for `.rsx` (rust-analyzer behind a source map, plus HTML,
   CSS and Tailwind completion), a tree-sitter grammar and a Zed extension.
@@ -78,7 +81,7 @@ yawn dev                                      # http://127.0.0.1:3000
 | command | does |
 |---|---|
 | `yawn dev` | builds the client and the server, serves, watches, reloads (`--port` picks the port) |
-| `yawn build` | production build into `dist/`; run the binary from there |
+| `yawn build` | production build into `dist/`; run the binary from there (`--static` writes HTML for a static host into `dist/public`) |
 | `yawn new <dir>` | creates a project (`--tailwind` turns Tailwind on); `yawn init` is the same command |
 | `yawn upgrade` | installs the latest release of `yawn` (`--check` only says whether there is one) |
 | `yawn rsx` | compiles the `.rsx` files and prints errors only |

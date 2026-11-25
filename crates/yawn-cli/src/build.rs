@@ -2,7 +2,7 @@ use crate::cli::BuildArgs;
 use crate::dev::project::Project;
 use crate::dev::{rsx, tailwind::Tailwind};
 use crate::error::CliError;
-use crate::finalize;
+use crate::{finalize, prerender};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Instant;
@@ -112,6 +112,7 @@ pub fn run(args: &BuildArgs) -> Result<ExitCode, CliError> {
     let started = Instant::now();
     let project = Project::detect(&std::env::current_dir()?)?;
     let root = project.root.clone();
+    let pages = if args.static_site { static_pages(&project)? } else { Vec::new() };
     let out: PathBuf = match &args.out {
         Some(o) if o.is_absolute() => o.clone(),
         Some(o) => std::env::current_dir()?.join(o),
@@ -164,6 +165,17 @@ pub fn run(args: &BuildArgs) -> Result<ExitCode, CliError> {
     let manifest =
         finalize::run(&finalize::Inputs { assets: &project.assets, pkg: &pkg, out: &public })
             .map_err(|e| CliError::new(format!("cannot write {}: {e}", public.display())))?;
+    if args.static_site {
+        step("rendering pages");
+        let host = project.config.server.host;
+        let written = prerender::run(&exe, &root, &public, host, &pages)?;
+        eprintln!();
+        eprintln!("yawn: built in {:.1}s", started.elapsed().as_secs_f32());
+        eprintln!("      {} page(s), {} data file(s)", written.pages, written.data);
+        eprintln!();
+        eprintln!("host it:  {}", public.display());
+        return Ok(ExitCode::SUCCESS);
+    }
     let server = out.join(&project.package);
     std::fs::copy(&exe, &server)?;
     if root.join(yawn::config::CONFIG_FILE).is_file() {
@@ -200,6 +212,22 @@ pub fn run(args: &BuildArgs) -> Result<ExitCode, CliError> {
     eprintln!();
     eprintln!("run it:  cd {} && ./{}", out.display(), project.package);
     Ok(ExitCode::SUCCESS)
+}
+
+/// The pages a static build renders: `src/routes/` without parameters (or `/` without folder
+/// routing), then `[build] prerender`
+fn static_pages(project: &Project) -> Result<Vec<String>, CliError> {
+    let mut pages = yawn_rsx::project::static_pages(&project.root);
+    if !yawn_rsx::project::uses_routes(&project.root) {
+        pages.push("/".to_string());
+    }
+    for page in &project.config.build.prerender {
+        prerender::check_page(page).map_err(CliError::new)?;
+        if !pages.contains(page) {
+            pages.push(page.clone());
+        }
+    }
+    Ok(pages)
 }
 
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {

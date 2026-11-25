@@ -79,6 +79,10 @@ pub struct BuildArgs {
     /// Directory to write (default `dist`, inside the project)
     #[arg(long, short, value_name = "DIR")]
     pub out: Option<std::path::PathBuf>,
+    /// Render the pages to `.html` for a static host, instead of a server: the pages in
+    /// `src/routes/` without parameters, plus `[build] prerender` in Yawn.toml
+    #[arg(long = "static")]
+    pub static_site: bool,
 }
 
 #[derive(Args, Debug)]
