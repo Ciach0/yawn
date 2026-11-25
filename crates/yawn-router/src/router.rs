@@ -18,6 +18,8 @@ struct State {
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     transitions: bool,
     nav: Cell<u64>,
+    /// Bumped by every prefetch and navigation: a delayed prefetch runs only if it is still the latest
+    prefetching: Cell<u64>,
     pending: Sig<bool>,
 }
 
@@ -126,6 +128,7 @@ pub fn render_with(routes: Routes, history: Rc<dyn History>) -> View {
         base,
         transitions,
         nav: Cell::new(0),
+        prefetching: Cell::new(0),
         pending: signal(false),
     });
     let mine = st.clone();
@@ -241,6 +244,7 @@ impl Navigator {
         let st = state();
         let ticket = st.nav.get() + 1;
         st.nav.set(ticket);
+        st.prefetching.set(st.prefetching.get() + 1);
         st.pending.set(false);
         #[cfg(target_arch = "wasm32")]
         {
@@ -262,14 +266,31 @@ impl Navigator {
     }
 
     /// Starts downloading what the page at `url` will read, without going there: for a link that is
-    /// hovered or touched, so the data is already on its way when it is clicked
-    pub fn prefetch(&self, url: &str) {
+    /// hovered or touched, so the data is already on its way when it is clicked.
+    ///
+    /// With `Some(ms)` it waits that long first and gives up if another prefetch or a navigation
+    /// came in the meantime, so only the last of a quick run of calls (the pointer passing over a
+    /// list of links) reaches the server
+    pub fn prefetch(&self, url: &str, delay_ms: Option<i32>) {
+        let st = state();
+        let ticket = st.prefetching.get() + 1;
+        st.prefetching.set(ticket);
         #[cfg(target_arch = "wasm32")]
-        {
-            state().preload_for(url);
+        match delay_ms {
+            None => {
+                st.preload_for(url);
+            }
+            Some(ms) => {
+                let (url, moved) = (url.to_string(), st.clone());
+                yawn::task::after(ms, move || {
+                    if moved.prefetching.get() == ticket {
+                        moved.preload_for(&url);
+                    }
+                });
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = url;
+        let _ = (url, delay_ms, ticket);
     }
 
     /// Goes to `url` in place of the current history entry
