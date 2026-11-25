@@ -1,0 +1,18 @@
+id = "rsx"
+name = "Yawn RSX"
+description = "Yawn .rsx: syntax highlighting (Rust, HTML-like markup, CSS) and the yawn-lsp language server."
+version = "0.1.0"
+schema_version = 1
+authors = ["Yawn"]
+repository = "https://github.com/yawn-rs/yawn"
+
+[language_servers.yawn-lsp]
+name = "Yawn LSP"
+languages = ["RSX", "Rust"]
+
+# The grammar lives in this repository. Set `commit` to a commit that contains `editors/tree-sitter-rsx`
+# before publishing the extension; `scripts/install-zed.sh` makes a local copy with its own values.
+[grammars.rsx]
+repository = "https://github.com/yawn-rs/yawn"
+commit = "0000000000000000000000000000000000000000"
+path = "editors/tree-sitter-rsx"

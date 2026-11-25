@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# Research projects and examples are independent workspaces (own Cargo.lock and profiles).
+exclude = ["bench", "examples"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.91"
+repository = "https://github.com/yawn-rs/yawn"
+homepage = "https://github.com/yawn-rs/yawn"
+keywords = ["web", "framework", "wasm", "reactive", "rsx"]
+categories = ["web-programming", "wasm", "gui"]
+
+# The version of a crate that depends on another one: keep it equal to `[workspace.package] version`.
+[workspace.dependencies]
+yawn-reactivity = { path = "crates/yawn-reactivity", version = "0.1.0" }
+yawn-rsx = { path = "crates/yawn-rsx", version = "0.1.0" }
+yawn-web = { path = "crates/yawn-web", version = "0.1.0", default-features = false }
+
+[profile.release]
+debug = false

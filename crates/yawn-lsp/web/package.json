@@ -1,0 +1,13 @@
+{
+  "name": "yawn-lsp-web",
+  "private": true,
+  "type": "module",
+  "description": "HTML and CSS intelligence for yawn-lsp: vscode-html-languageservice and vscode-css-languageservice behind a line-based JSON protocol. `npm run build` bundles web.mjs into dist/web.cjs, which yawn-lsp embeds.",
+  "scripts": { "build": "esbuild web.mjs --bundle --main-fields=module,main --platform=node --format=cjs --minify --outfile=dist/web.cjs" },
+  "dependencies": {
+    "vscode-css-languageservice": "6.3.2",
+    "vscode-html-languageservice": "5.3.1",
+    "vscode-languageserver-textdocument": "1.0.12"
+  },
+  "devDependencies": { "esbuild": "0.24.2" }
+}

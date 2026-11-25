@@ -1,0 +1,25 @@
+[package]
+name = "yawn-lsp"
+version.workspace = true
+edition.workspace = true
+description = "Language server for .rsx: rust-analyzer behind a source map, plus HTML and CSS completion"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["lsp", "language-server", "rsx", "web", "wasm"]
+include = ["src/**", "data/tailwind-classes.txt", "web/dist/web.cjs", "/README.md"]
+categories = ["development-tools", "web-programming"]
+rust-version.workspace = true
+
+[[bin]]
+name = "yawn-lsp"
+path = "src/main.rs"
+
+[dependencies]
+yawn-rsx.workspace = true
+yawn-web = { workspace = true, features = ["config"] }
+lsp-server = "0.7"
+lsp-types = "0.94"
+crossbeam-channel = "0.5"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }

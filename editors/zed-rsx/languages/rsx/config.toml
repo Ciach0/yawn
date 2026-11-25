@@ -1,0 +1,17 @@
+name = "RSX"
+grammar = "rsx"
+path_suffixes = ["rsx"]
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
+autoclose_before = ";:.,=}])>"
+brackets = [
+  { start = "{", end = "}", close = true, newline = true },
+  { start = "(", end = ")", close = true, newline = false },
+  { start = "[", end = "]", close = true, newline = false },
+  { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+  { start = "<", end = ">", close = false, newline = true },
+]
+word_characters = ["-", "_"]
+# without this Zed ends the completion query at `-`, so `bg-` closes the Tailwind list
+completion_query_characters = ["-"]
+tab_size = 4

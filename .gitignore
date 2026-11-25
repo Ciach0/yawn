@@ -1,0 +1,28 @@
+# build output (root workspace and every independent research workspace)
+target/
+**/target/
+
+# `yawn build` output of the example
+examples/*/dist/
+
+# editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# local scratch
+*.log
+*.tmp
+.claude/settings.local.json
+
+# member crates use the root Cargo.lock; stray per-crate lockfiles come from editor tooling
+crates/*/Cargo.lock
+
+# the Zed extension: built locally
+editors/zed-rsx/extension.wasm
+editors/zed-rsx/grammars/
+
+# generated from .rsx (visible to rust-analyzer, unlike target/)
+.yawn/
+node_modules/

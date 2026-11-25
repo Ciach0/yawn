@@ -1,0 +1,9 @@
+{
+  "name": "tree-sitter-rsx",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Yawn .rsx files",
+  "main": "bindings/node",
+  "scripts": { "generate": "tree-sitter generate", "test": "tree-sitter test" },
+  "devDependencies": { "tree-sitter-cli": "^0.25.0" },
+  "tree-sitter": [{ "scope": "source.rsx", "file-types": ["rsx"] }]
+}

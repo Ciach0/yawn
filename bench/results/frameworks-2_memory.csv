@@ -1,0 +1,5 @@
+kind,yawn_bytes_per_node,dioxus_bytes_per_node,sycamore_bytes_per_node,yawn_create_ns,dioxus_create_ns,sycamore_create_ns
+signal,172.3,147.4,249.2,75,159,89
+memo_1dep,184.0,938.9,275.7,167,14042,161
+effect_1dep,256.0,753.5,267.7,175,14185,109
+memo+effect,424.3,1830.2,564.8,349,53866,418

@@ -1,0 +1,122 @@
+use std::ops::Range;
+
+pub type Span = Range<usize>;
+
+#[derive(Debug, Clone)]
+pub struct File {
+    pub items: Vec<Item>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Item {
+    /// Plain Rust (imports, helper functions, structs...), copied unchanged
+    Rust(Span),
+    Component(Component),
+}
+
+#[derive(Debug, Clone)]
+pub struct Component {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Param>,
+    /// Rust statements that run once when the component is created
+    pub setup: Span,
+    pub view: Vec<Node>,
+    /// Inner range of the `style { ... }` block (plain CSS, global), if any
+    pub style: Option<Span>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Param {
+    pub name: String,
+    pub ty: Span,
+    /// The whole parameter as written, `mut` included
+    pub span: Span,
+    /// `name: Type` as written, without `mut`: copied into the generated field so that hover and
+    /// go-to-definition on the name map back to the source
+    pub decl: Span,
+    /// `= expr` after the type: the value when the caller leaves the prop out
+    pub default: Option<Span>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Node {
+    Element(Element),
+    Text(Text),
+    /// `{expr}`; the range excludes the braces
+    Expr(Span),
+    /// `<slot />` places the component's `children`; `<slot name="x" />` places its `x` prop (also
+    /// a `Children`), which the caller fills with `slot="x"` on a child or `<template slot="x">`
+    Slot(Span, Option<String>),
+    If(If),
+    For(For),
+}
+
+#[derive(Debug, Clone)]
+pub struct Element {
+    pub name: String,
+    pub name_span: Span,
+    pub is_component: bool,
+    pub attrs: Vec<Attr>,
+    pub children: Vec<Node>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Attr {
+    pub name: String,
+    pub name_span: Span,
+    pub value: AttrValue,
+}
+
+#[derive(Debug, Clone)]
+pub enum AttrValue {
+    /// `disabled`
+    Flag,
+    /// `class="a {b}"`
+    Text(Text),
+    /// `value={expr}`
+    Expr(Span),
+}
+
+/// A string literal, possibly with `{expr}` interpolations
+#[derive(Debug, Clone)]
+pub struct Text {
+    /// Range of the whole literal including quotes
+    pub span: Span,
+    pub parts: Vec<Part>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Part {
+    /// Literal text exactly as written between the quotes (escapes included, `{{` kept)
+    Lit(Span),
+    /// `{expr}` or `{expr:spec}`
+    Interp { expr: Span, spec: Option<Span> },
+}
+
+impl Text {
+    pub fn is_static(&self) -> bool {
+        self.parts.iter().all(|p| matches!(p, Part::Lit(_)))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct If {
+    pub span: Span,
+    pub cond: Span,
+    /// For `if let PAT = EXPR`: the pattern and the scrutinee, both inside `cond`
+    pub binding: Option<(Span, Span)>,
+    pub then: Vec<Node>,
+    /// Either the `else` block, or a single nested `If` for `else if`
+    pub otherwise: Option<Vec<Node>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct For {
+    pub span: Span,
+    pub pat: Span,
+    pub iter: Span,
+    pub key: Span,
+    pub body: Vec<Node>,
+}

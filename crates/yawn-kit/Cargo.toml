@@ -1,0 +1,24 @@
+[package]
+name = "yawn-kit"
+version.workspace = true
+edition.workspace = true
+description = "Browser tools for Yawn applications (shortcuts, swipes, ...), written only on the framework's public API"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["editing"]
+# The rich text box, selection, caret and drag-scroll helpers; the largest piece of browser code in the kit
+editing = []
+
+[dependencies]
+# Nothing here may reach into the framework's private parts: if a tool needs more than `yawn`'s public API gives, the framework gets
+# the missing primitive, the tool does not get a back door.
+yawn-web.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"

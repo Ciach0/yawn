@@ -1,0 +1,41 @@
+[package]
+name = "yawn-cli"
+version.workspace = true
+edition.workspace = true
+description = "The `yawn` command line tool: argument handling, event pipeline and terminal UI"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["cli", "web", "wasm", "rsx", "dev-server"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
+rust-version.workspace = true
+
+[[bin]]
+name = "yawn"
+path = "src/main.rs"
+# the library `yawn` (package yawn-web) owns that documentation name
+doc = false
+
+# `cargo binstall yawn-cli` downloads the archive that the release workflow attaches to the GitHub
+# release of the tag, instead of compiling.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+ratatui = { version = "0.30.0", features = ["scrolling-regions"] }
+yawn-web = { workspace = true, features = ["config"] }
+yawn-rsx.workspace = true
+notify = "8"
+serde_json = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
+
+[target."cfg(unix)".dependencies]
+signal-hook = "0.4.6"
+libc = "0.2"
