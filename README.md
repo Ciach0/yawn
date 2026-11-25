@@ -86,22 +86,6 @@ yawn dev                                      # http://127.0.0.1:3000
 
 A project to read and run is in [`examples/`](examples/README.md).
 
-## What's in the repository
-
-| crate | what it is |
-|---|---|
-| [`yawn-web`](crates/yawn-web) | the framework: config, HTTP server, SSR, renderer, browser backend, `http` client. Its library name is `yawn` |
-| [`yawn-reactivity`](crates/yawn-reactivity/README.md) | signals, memos, effects, scopes; single-threaded, safe Rust, no dependencies |
-| [`yawn-rsx`](crates/yawn-rsx/README.md) | the `.rsx` compiler: parser, code generation, source maps |
-| [`yawn-router`](crates/yawn-router/README.md) | nested routes, layouts, params, preload |
-| [`yawn-kit`](crates/yawn-kit) | browser helpers (shortcuts, drag and drop, swipes) built only on the public API |
-| [`yawn-cli`](crates/yawn-cli/README.md) | the `yawn` command |
-| [`yawn-lsp`](crates/yawn-lsp) | the language server for `.rsx` |
-| [`yawn-rsx-tests`](crates/yawn-rsx-tests) | end-to-end tests: `.rsx` fixtures compiled and rendered natively |
-
-[`bench/`](bench/README.md) holds the benchmark tool, and
-[`editors/`](editors/README.md) the tree-sitter grammar and the Zed extension.
-
 ## Performance
 
 Measured on one machine (i5-12400F), reactivity only, on a 15-scenario suite: by geometric mean of
@@ -142,10 +126,13 @@ To release, set the new version in `Cargo.toml` (`[workspace.package]` and the t
 `yawn` binaries that `cargo binstall` downloads, attaches them to the GitHub release and publishes
 the crates.
 
-## Name
+## Contributing
 
-The framework crate is `yawn-web`; its library name is `yawn` (`use yawn::ui::...`). The command
-line tool is `yawn` (package `yawn-cli`).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are welcome.
+
+<a href="https://github.com/yawn-rs/yawn/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=yawn-rs/yawn&max=30&columns=10" />
+</a>
 
 ## License
 
