@@ -302,8 +302,8 @@ impl Gen<'_> {
     }
 
     fn static_str(&mut self, t: &Text) {
-        let src = self.src;
-        self.w.raw(&src[t.span.clone()]);
+        let lit = self.src[t.span.clone()].replace("{{", "{").replace("}}", "}");
+        self.w.raw(&lit);
     }
 
     fn children(&mut self, nodes: &[Node], sink: &str) -> Result<()> {
