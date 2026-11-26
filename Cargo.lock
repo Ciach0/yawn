@@ -3003,7 +3003,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "signal-hook 0.4.6",
- "syn 2.0.119",
+ "syn 3.0.10",
  "yawn-rsx",
  "yawn-web",
 ]
@@ -3046,7 +3046,7 @@ name = "yawn-rsx"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
- "syn 2.0.119",
+ "syn 3.0.10",
  "toml",
 ]
 
