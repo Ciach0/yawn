@@ -58,7 +58,7 @@ fn static_and_dynamic_text() {
     let out = ok(
         "component A() { let n = signal(1); view { <p>\"plain {{braces}}\"</p> <p>\"n = {n}, {n:>4}\"</p> } }",
     );
-    assert!(out.contains("__rt::text_lit(\"plain {{braces}}\")"));
+    assert!(out.contains("__rt::text_lit(\"plain {braces}\")"));
     assert!(out.contains("__rt::text_fmt(move || ::std::format!(\"n = {}, {:>4}\", (n), (n)))"));
 }
 
