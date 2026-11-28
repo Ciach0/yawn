@@ -218,6 +218,29 @@ fn calls(text: &str, name: &str) -> bool {
     })
 }
 
+/// The names of the items that differ between two lists of `hash@name`: the ones an edit removed,
+/// changed or added. `None` when one of them has no name, so nobody can tell who uses it
+fn touched(before: Option<&Vec<String>>, after: Option<&Vec<String>>) -> Option<BTreeSet<String>> {
+    let (before, after) = (before?, after?);
+    let mut left = after.clone();
+    let mut names = BTreeSet::new();
+    for b in before {
+        match left.iter().position(|a| a == b) {
+            Some(i) => {
+                left.swap_remove(i);
+            }
+            None => {
+                names.insert(b.clone());
+            }
+        }
+    }
+    names.extend(left);
+    names
+        .into_iter()
+        .map(|t| t.split_once('@').map(|(_, n)| n.to_string()).filter(|n| n != "-"))
+        .collect()
+}
+
 /// Whether every item of `before` is still in `after`, as it was, and `after` has more: the file
 /// only gained items
 fn only_added(before: Option<&Vec<String>>, after: Option<&Vec<String>>) -> bool {
@@ -479,7 +502,30 @@ impl Dynamic {
                         changed.push(path.clone());
                         continue;
                     }
-                    return Plan::Full(format!("{} changed outside a body", path.display()));
+                    let used_elsewhere = touched(prev_items.get(path), next_items.get(path))
+                        .and_then(|names| {
+                            let others = next.keys().filter(|p| *p != path);
+                            let hit = others.filter_map(|p| std::fs::read_to_string(p).ok()).find_map(
+                                |text| names.iter().find(|n| mentions(&text, n)).cloned(),
+                            );
+                            Some(hit)
+                        });
+                    match used_elsewhere {
+                        Some(None) => {
+                            additive.insert(path.clone());
+                            changed.push(path.clone());
+                            continue;
+                        }
+                        Some(Some(name)) => {
+                            return Plan::Full(format!(
+                                "{} changed `{name}`, which other files use",
+                                path.display()
+                            ));
+                        }
+                        None => {
+                            return Plan::Full(format!("{} changed outside a body", path.display()));
+                        }
+                    }
                 }
                 Some(_) => changed.push(path.clone()),
                 None => fresh.push(path.clone()),
@@ -1900,4 +1946,29 @@ fn fast_linker() -> Option<&'static str> {
             Command::new(bin).arg("--version").output().is_ok_and(|o| o.status.success())
         })
     })
+}
+
+#[cfg(test)]
+mod touched_tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_removed_or_changed_item_is_named() {
+        let before = v(&["a1@Dupa", "b1@Hero", "c1@Dupa"]);
+        let after = v(&["b1@Hero", "d1@Dupa1", "e1@Dupa1"]);
+        let names = touched(Some(&before), Some(&after)).unwrap();
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["Dupa", "Dupa1"]);
+        assert!(touched(Some(&before), Some(&before)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_item_without_a_name_cannot_be_told_apart() {
+        let before = v(&["a1@-"]);
+        assert_eq!(touched(Some(&before), Some(&v(&[]))), None);
+        assert_eq!(touched(None, Some(&before)), None);
+    }
 }

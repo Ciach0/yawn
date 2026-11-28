@@ -467,14 +467,44 @@ struct Work<'a> {
     handlers: bool,
     async_all: bool,
     item_ranges: Vec<(usize, usize)>,
+    item_names: Vec<String>,
     uses: Vec<(usize, usize)>,
     items_known: bool,
 }
 
-fn item_hashes(text: &str, ranges: &[(usize, usize)], cuts: &[(usize, usize)]) -> Vec<String> {
+/// What a top-level item is called, for the dev build to tell which items an edit touched: the
+/// name of a type, function, constant..., the type of an `impl`, `-` for what has no name
+fn item_name(item: &syn::Item) -> String {
+    use syn::Item::*;
+    let ident = match item {
+        Struct(i) => Some(i.ident.to_string()),
+        Enum(i) => Some(i.ident.to_string()),
+        Union(i) => Some(i.ident.to_string()),
+        Fn(i) => Some(i.sig.ident.to_string()),
+        Const(i) => Some(i.ident.to_string()),
+        Static(i) => Some(i.ident.to_string()),
+        Type(i) => Some(i.ident.to_string()),
+        Trait(i) => Some(i.ident.to_string()),
+        Mod(i) => Some(i.ident.to_string()),
+        Impl(i) => match &*i.self_ty {
+            syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        },
+        _ => None,
+    };
+    ident.unwrap_or_else(|| "-".into())
+}
+
+fn item_hashes(
+    text: &str,
+    ranges: &[(usize, usize)],
+    names: &[String],
+    cuts: &[(usize, usize)],
+) -> Vec<String> {
     ranges
         .iter()
-        .filter_map(|&(a, b)| {
+        .zip(names)
+        .filter_map(|(&(a, b), name)| {
             let mut one = String::new();
             let mut at = a;
             for &(ca, cb) in cuts.iter().filter(|&&(ca, cb)| ca < b && cb > a) {
@@ -484,7 +514,7 @@ fn item_hashes(text: &str, ranges: &[(usize, usize)], cuts: &[(usize, usize)]) -
             one.push_str(text.get(at..b)?);
             let mut h = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&without_bodies(&one), &mut h);
-            Some(format!("{:016x}", std::hash::Hasher::finish(&h)))
+            Some(format!("{:016x}@{name}", std::hash::Hasher::finish(&h)))
         })
         .collect()
 }
@@ -665,6 +695,7 @@ pub fn transform(text: &str, source_dir: &Path, unit: &str) -> Option<String> {
             || Path::new(unit) == Path::new("server.rs"),
         async_all: ASYNC_ALL.load(std::sync::atomic::Ordering::Relaxed),
         item_ranges: Vec::new(),
+        item_names: Vec::new(),
         uses: Vec::new(),
         items_known: true,
     };
@@ -673,7 +704,10 @@ pub fn transform(text: &str, source_dir: &Path, unit: &str) -> Option<String> {
             matches!(item, syn::Item::Use(u) if matches!(u.vis, syn::Visibility::Inherited));
         match item_range(&text, &work.starts, item) {
             Some(r) if private_use => work.uses.push(r),
-            Some(r) => work.item_ranges.push(r),
+            Some(r) => {
+                work.item_ranges.push(r);
+                work.item_names.push(item_name(item));
+            }
             None => work.items_known = false,
         }
         if private_use {
@@ -716,7 +750,7 @@ pub fn transform(text: &str, source_dir: &Path, unit: &str) -> Option<String> {
     work.edits.extend(statics.edits);
     if work.edits.is_empty() {
         if work.items_known && !unit.is_empty() {
-            let mut items = item_hashes(&text, &work.item_ranges, &[]);
+            let mut items = item_hashes(&text, &work.item_ranges, &work.item_names, &[]);
             items.sort();
             let mut uses = work.uses.clone();
             uses.sort();
@@ -804,7 +838,7 @@ fn finish(work: Work<'_>, unit: &str) -> Option<String> {
     with_uses.sort();
     let skeleton = without_bodies(&cut(text, &with_uses)?);
     let items: Option<Vec<String>> =
-        work.items_known.then(|| item_hashes(text, &work.item_ranges, &cuts));
+        work.items_known.then(|| item_hashes(text, &work.item_ranges, &work.item_names, &cuts));
     let mut edits = work.edits;
     edits.sort_by_key(|e| (e.at, e.end));
     let mut out = String::with_capacity(text.len() + edits.len() * 400);
