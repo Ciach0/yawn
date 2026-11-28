@@ -6,6 +6,60 @@ use std::path::{Path, PathBuf};
 
 /// Where generated code goes, relative to the project root
 pub const OUT_DIR: &str = ".yawn/rsx";
+
+const DEV_PID: &str = ".yawn/dev.pid";
+
+/// Marks the project as being served by `yawn dev` for as long as it lives: that process keeps the
+/// generated files current (in its own form), so other writers of them (the language server) leave
+/// them alone
+pub struct DevMark(PathBuf);
+
+impl DevMark {
+    pub fn new(root: &Path) -> DevMark {
+        let file = root.join(DEV_PID);
+        if let Some(dir) = file.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(&file, std::process::id().to_string());
+        DevMark(file)
+    }
+}
+
+impl DevMark {
+    /// Writes the mark again if it went away (the `.yawn` folder was deleted while this runs)
+    pub fn refresh(root: &Path) {
+        let file = root.join(DEV_PID);
+        if !file.exists() {
+            if let Some(dir) = file.parent() {
+                let _ = fs::create_dir_all(dir);
+            }
+            let _ = fs::write(&file, std::process::id().to_string());
+        }
+    }
+}
+
+impl Drop for DevMark {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Whether a `yawn dev` of the project is running
+pub fn dev_running(root: &Path) -> bool {
+    let Some(pid) = fs::read_to_string(root.join(DEV_PID)).ok().and_then(|t| t.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    if cfg!(target_os = "linux") {
+        Path::new("/proc").join(pid.to_string()).exists()
+    } else {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
 /// The entry point of a project
 pub const ENTRY: &str = "main.rsx";
 /// Generated crate roots (client: WASM library, server: binary) for a project with an entry point
@@ -41,7 +95,7 @@ fn server_mod(root: &Path) -> String {
     match server_file(root) {
         Some(f) => format!(
             "\n#[cfg(not(target_arch = \"wasm32\"))]\n#[path = {:?}]\npub mod server;\n",
-            slashed(&f)
+            slashed(&crate::mirror::redirect(&f))
         ),
         None => String::new(),
     }
@@ -69,7 +123,7 @@ fn path_mod_in(dir: &Path, line: &str) -> String {
     }
     for file in [dir.join(format!("{}.rs", name.trim())), dir.join(name.trim()).join("mod.rs")] {
         if file.is_file() {
-            return format!("#[path = {:?}] {line}", slashed(&file));
+            return format!("#[path = {:?}] {line}", slashed(&crate::mirror::redirect(&file)));
         }
     }
     line.to_string()
@@ -397,6 +451,7 @@ pub fn compile_project_with(root: &Path, split: bool) -> Result<Report, Vec<File
 fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> {
     let dynamic = split && dynamic_enabled(root);
     crate::codegen::set_dynamic(dynamic);
+    crate::mirror::begin(root, dynamic && crate::mirror::enabled(root));
     let out = out_dir(root);
     let sources = find_sources(root);
     let mut errors = Vec::new();
@@ -602,6 +657,7 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
                 css.push_str(&file_css);
                 let gen_path = out.join(&rust_name);
                 let map_path = out.join(format!("{stem}.map"));
+                let rust = crate::mirror::generated(root, rust, &format!("rsx/{stem}"));
                 let wrote = write_if_changed(&gen_path, &rust)
                     .and_then(|a| write_if_changed(&map_path, &map_text).map(|b| a || b));
                 match wrote {
@@ -661,6 +717,10 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
     {
         folder_files
             .extend(crate::api::module_files(&out.join(crate::api::MODULE_DIR), &endpoints));
+    }
+    match crate::mirror::write_all(root, &mut keep) {
+        Ok(n) => report.written += n,
+        Err(e) => return Err(vec![problem(".yawn/rsx", format!("cannot write the mirror: {e}"))]),
     }
     // one crate, or several (see `split`); before the module files are written, since the split
     // rewrites some of them

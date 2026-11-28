@@ -12,4 +12,5 @@ rust-version.workspace = true
 [dependencies]
 toml = "0.8"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-syn = { version = "3", default-features = false, features = ["full", "parsing", "clone-impls"] }
+syn = { version = "3", default-features = false, features = ["full", "parsing", "printing", "clone-impls", "visit"] }
+quote = "1"

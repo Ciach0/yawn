@@ -200,6 +200,10 @@ fn children_of(file: &Path, text: &str) -> Option<Vec<Child>> {
     Some(out)
 }
 
+/// How many lines of source a crate of the dev split holds at most before the next module goes into
+/// another crate of its level (an edit costs rustc about as much as the crate is big); 0 for no limit
+pub static MAX_LINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(2000);
+
 fn stateful(text: &str) -> bool {
     text.lines().filter(|l| !l.contains("__YAWN_REGISTER")).any(|l| {
         let t = l.trim_start();
@@ -448,9 +452,28 @@ pub fn refine(root: &Path, plan: &Plan, macros: &[Vec<String>]) -> Option<Refine
         memo[c] = Some(l);
         l
     }
-    let comp_state: Vec<bool> =
-        comps.iter().map(|comp| comp.iter().any(|&v| stateful(&nodes[v].text))).collect();
-    let mut crate_of: BTreeMap<(usize, bool), usize> = BTreeMap::new();
+    let comp_state: Vec<u8> = comps
+        .iter()
+        .map(|comp| {
+            comp.iter().any(|&v| stateful(&nodes[v].text)) as u8
+        })
+        .collect();
+    if std::env::var_os("YAWN_SPLIT_DEBUG").is_some() {
+        for (c, comp) in comps.iter().enumerate() {
+            let lines: usize = comp.iter().map(|&v| nodes[v].text.lines().count()).sum();
+            if lines > 600 {
+                let files: Vec<String> = comp
+                    .iter()
+                    .take(6)
+                    .map(|&v| nodes[v].file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
+                    .collect();
+                eprintln!("SPLIT comp level {} state {} {} nodes {} lines {:?}", { let mut m = vec![None; comps.len()]; level_of(c, &comp_deps, &mut m) }, comp_state[c], comp.len(), lines, files);
+            }
+        }
+    }
+    let max_lines = MAX_LINES.load(std::sync::atomic::Ordering::Relaxed);
+    let mut crate_of: BTreeMap<(usize, u8, usize), usize> = BTreeMap::new();
+    let mut fill: BTreeMap<(usize, u8), (usize, usize)> = BTreeMap::new();
     let mut crates: Vec<RCrate> = Vec::new();
     let mut node_crate = vec![0usize; n];
     let mut order: Vec<usize> = (0..comps.len()).collect();
@@ -458,14 +481,20 @@ pub fn refine(root: &Path, plan: &Plan, macros: &[Vec<String>]) -> Option<Refine
         (0..comps.len()).map(|c| level_of(c, &comp_deps, &mut level)).collect();
     order.sort_by_key(|&c| (levels[c], comps[c][0]));
     for c in order {
-        let key = (levels[c], comp_state[c]);
+        let lines: usize = comps[c].iter().map(|&v| nodes[v].text.lines().count()).sum();
+        let slot = fill.entry((levels[c], comp_state[c])).or_insert((0, 0));
+        if max_lines > 0 && slot.1 > 0 && slot.1 + lines > max_lines {
+            *slot = (slot.0 + 1, 0);
+        }
+        slot.1 += lines;
+        let key = (levels[c], comp_state[c], slot.0);
         let k = *crate_of.entry(key).or_insert_with(|| {
+            let base = match key.1 {
+                1 => format!("layer{}_state", key.0),
+                _ => format!("layer{}", key.0),
+            };
             crates.push(RCrate {
-                dir: if key.1 {
-                    format!("layer{}_state", key.0)
-                } else {
-                    format!("layer{}", key.0)
-                },
+                dir: if key.2 == 0 { base } else { format!("{base}_{}", key.2 + 1) },
                 nodes: Vec::new(),
                 needs: BTreeSet::new(),
             });

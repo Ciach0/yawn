@@ -221,7 +221,7 @@ pub fn module_files(dir: &Path, endpoints: &[Endpoint]) -> Vec<(PathBuf, String)
         for (name, i) in &t.files {
             text.push_str(&format!(
                 "#[path = {:?}]\npub mod {name};\n",
-                crate::project::slashed(&endpoints[*i].file)
+                crate::project::slashed(&crate::mirror::redirect(&endpoints[*i].file))
             ));
         }
         for (name, sub) in &t.dirs {
