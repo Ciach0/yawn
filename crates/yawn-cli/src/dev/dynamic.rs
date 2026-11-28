@@ -102,7 +102,8 @@ pub struct Dynamic {
     native: Vec<(String, PathBuf)>,
     learned: BTreeSet<String>,
     runtime_off: bool,
-    runtime_seen: std::collections::HashMap<PathBuf, ((std::time::SystemTime, u64), BTreeSet<String>)>,
+    runtime_seen:
+        std::collections::HashMap<PathBuf, ((std::time::SystemTime, u64), BTreeSet<String>)>,
     failures: Option<BTreeSet<String>>,
     sigs: Sigs,
     items: Items,
@@ -506,13 +507,12 @@ impl Dynamic {
                         changed.push(path.clone());
                         continue;
                     }
-                    let used_elsewhere = touched(prev_items.get(path), next_items.get(path))
-                        .and_then(|names| {
+                    let used_elsewhere =
+                        touched(prev_items.get(path), next_items.get(path)).map(|names| {
                             let others = next.keys().filter(|p| *p != path);
-                            let hit = others.filter_map(|p| std::fs::read_to_string(p).ok()).find_map(
-                                |text| names.iter().find(|n| mentions(&text, n)).cloned(),
-                            );
-                            Some(hit)
+                            others
+                                .filter_map(|p| std::fs::read_to_string(p).ok())
+                                .find_map(|text| names.iter().find(|n| mentions(&text, n)).cloned())
                         });
                     match used_elsewhere {
                         Some(None) => {
@@ -527,7 +527,10 @@ impl Dynamic {
                             ));
                         }
                         None => {
-                            return Plan::Full(format!("{} changed outside a body", path.display()));
+                            return Plan::Full(format!(
+                                "{} changed outside a body",
+                                path.display()
+                            ));
                         }
                     }
                 }
@@ -1358,7 +1361,8 @@ impl Dynamic {
         {
             for e in rd.flatten() {
                 let n = e.file_name().to_string_lossy().into_owned();
-                let std_crate = ["libstd-", "liballoc-", "libcore-"].iter().any(|p| n.starts_with(p));
+                let std_crate =
+                    ["libstd-", "liballoc-", "libcore-"].iter().any(|p| n.starts_with(p));
                 if !(std_crate && n.ends_with(".rlib")) {
                     continue;
                 }
@@ -1374,10 +1378,8 @@ impl Dynamic {
                 }
             }
         }
-        self.runtime_seen.insert(
-            PathBuf::from("<std>"),
-            ((std::time::SystemTime::UNIX_EPOCH, 0), set.clone()),
-        );
+        self.runtime_seen
+            .insert(PathBuf::from("<std>"), ((std::time::SystemTime::UNIX_EPOCH, 0), set.clone()));
         set
     }
 

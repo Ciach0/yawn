@@ -864,9 +864,9 @@ impl Dev {
                                             &kill,
                                             &mut |p| seen.push(p.clone()),
                                         ),
-                                        None => Err(dynamic::SideError::Fallback(
-                                            format!("server: {missing_note}"),
-                                        )),
+                                        None => Err(dynamic::SideError::Fallback(format!(
+                                            "server: {missing_note}"
+                                        ))),
                                     };
                                     match r {
                                         Ok(list) => {

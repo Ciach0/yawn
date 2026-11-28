@@ -782,10 +782,10 @@ impl Server {
             }
             ("textDocument/didClose", Some(uri)) if is_rsx(&uri) => self.close(&uri),
             ("textDocument/didSave", Some(uri)) if is_rsx(&uri) => {
-                if let Some(root) = self.docs.get(&uri).and_then(|d| d.root.clone()) {
-                    if !project::dev_running(&root) {
-                        let _ = project::compile_project(&root); // keeps the generated files on disk current
-                    }
+                if let Some(root) = self.docs.get(&uri).and_then(|d| d.root.clone())
+                    && !project::dev_running(&root)
+                {
+                    let _ = project::compile_project(&root); // keeps the generated files on disk current
                 }
                 // rust-analyzer's `cargo check` runs when it is told a file was saved. The user saved the
                 // `.rsx`, so tell it the generated module was: otherwise errors from the last check stay.

@@ -280,7 +280,7 @@ impl Gen<'_> {
             return;
         }
         let w = &mut self.w;
-        w.raw("\n#[cfg(not(target_arch = \"wasm32\"))]\n#[doc(hidden)]\npub fn __yawn_server_fns(r: ::yawn::server::axum::Router) -> ::yawn::server::axum::Router {");
+        w.raw("\n#[cfg(not(target_arch = \"wasm32\"))]\n#[doc(hidden)]\n#[allow(clippy::let_and_return)]\npub fn __yawn_server_fns(r: ::yawn::server::axum::Router) -> ::yawn::server::axum::Router {");
         for (name, method, encoding) in names {
             w.raw(&format!(
                 "\n    let r = ::yawn::fns::route::<::yawn::fns::codec::{}, _, _>(r, &::yawn::fns::url(::core::module_path!(), \"{name}\"), ::yawn::fns::Method::{}, {name});",
