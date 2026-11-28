@@ -11,7 +11,7 @@ mod pipe;
 #[cfg(target_arch = "wasm32")]
 pub use pipe::ArgBuilder;
 #[cfg(not(target_arch = "wasm32"))]
-pub use pipe::pending;
+pub use pipe::{ArgFuture, pending};
 pub use pipe::{IntoArg, Pending, Piped};
 
 #[cfg(target_arch = "wasm32")]

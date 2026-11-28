@@ -380,6 +380,13 @@ fn server_fns_run_the_body_on_the_server() {
     let account = now(server_fns::open_account_p("ann".to_string()));
     assert_eq!(account, Ok(server_fns::Account { id: 3, name: "ann".into() }));
     assert_eq!(now(server_fns::label_p(4u32, "n".to_string())), Ok("n4".to_string()));
+    // a piece of an earlier answer works on the server as in the batch
+    let account = server_fns::open_account_p("bob".to_string());
+    let label = server_fns::label_p(account.pick(|a| a.id), "id-".to_string());
+    assert_eq!(now(label), Ok("id-3".to_string()));
+    let named = server_fns::label_p(1u32, account.pick(|a| a.name));
+    assert_eq!(now(named), Ok("bob1".to_string()));
+    assert_eq!(now(account), Ok(server_fns::Account { id: 3, name: "bob".into() }));
     // axum checks the routes as they are added: distinct paths
     let _ = server_fns::__yawn_server_fns(yawn::server::axum::Router::new());
     let app = mount(server_fns::Adder::default());

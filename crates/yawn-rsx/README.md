@@ -227,8 +227,8 @@ types:
 
   `pick` takes the fields `#[derive(Bits)]` writes for a struct (`user.pick(|u| u.profile).pick(|p|
   p.age)`), so a field that does not exist is a compile error. A piece is good for the tick it was
-  made in, and it needs the browser: while rendering on the server a piece has no value and the call
-  fails.
+  made in (in the browser). While rendering on the server the call runs where it is and the piece is
+  cut from the answer of the earlier one, so the same code works in both.
 - **WebSocket.** With the `yawn-web` features `ws` (server) and `socket` (browser), batches travel
   over one socket the page opens on first use at `/__yawn/ws`. The extractors (session, headers)
   run against the upgrade request, which is checked once, and the browser skips a request's

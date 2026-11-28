@@ -231,7 +231,7 @@ impl Gen<'_> {
                 }
                 w.raw(" ::yawn::fns::pending(async move {");
                 for p in &f.params {
-                    w.raw(&format!(" let {} = {}?;", p.name, p.name));
+                    w.raw(&format!(" let {} = {}.await?;", p.name, p.name));
                 }
                 let args: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
                 w.raw(&format!(" {}({}).await }}) }}", f.name, args.join(", ")));
