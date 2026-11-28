@@ -20,9 +20,11 @@ pub fn parse(src: &str) -> Result<File> {
             Kind::Open(_) => depth += 1,
             Kind::Close(_) => depth = depth.saturating_sub(1),
             Kind::Ident
-                if depth == 0 && &src[i..end] == "component" && is_component_start(src, end) =>
+                if depth == 0
+                    && (&src[i..end] == "component" && is_component_start(src, end)
+                        || &src[i..end] == "server" && server_fn_kw(src, end).is_some()) =>
             {
-                // `pub component` is accepted: components are always public.
+                // `pub component` and `pub server fn` are accepted: both are always public.
                 let mut start = i;
                 let before = src[rust_from..i].trim_end();
                 if before.ends_with("pub")
@@ -34,8 +36,15 @@ pub fn parse(src: &str) -> Result<File> {
                 if start > rust_from {
                     items.push(Item::Rust(rust_from..start));
                 }
-                let (comp, next) = parse_component(src, end)?;
-                items.push(Item::Component(comp));
+                let next = if let Some(after_fn) = server_fn_kw(src, end) {
+                    let (f, next) = parse_server_fn(src, after_fn)?;
+                    items.push(Item::ServerFn(f));
+                    next
+                } else {
+                    let (comp, next) = parse_component(src, end)?;
+                    items.push(Item::Component(comp));
+                    next
+                };
                 rust_from = next;
                 i = next;
                 continue;
@@ -133,6 +142,83 @@ fn is_component_start(src: &str, after_kw: usize) -> bool {
     let rest = &src[after_kw..];
     rest.starts_with(|c: char| c.is_whitespace())
         && rest.trim_start().starts_with(|c: char| c.is_uppercase())
+}
+
+/// After `server`: the end of the `fn` that makes it a server function
+fn server_fn_kw(src: &str, after_kw: usize) -> Option<usize> {
+    let at = scan::skip_trivia(src, after_kw, src.len()).ok()?;
+    if at == after_kw || at >= src.len() {
+        return None;
+    }
+    let (kind, end) = scan::token(src, at).ok()?;
+    (kind == Kind::Ident && &src[at..end] == "fn").then_some(end)
+}
+
+fn parse_server_fn(src: &str, after_fn: usize) -> Result<(ServerFn, usize)> {
+    let shape = "a server function looks like `server fn name(arg: Type) -> Type { body }`";
+    let at = scan::skip_trivia(src, after_fn, src.len())?;
+    let (kind, name_end) = if at < src.len() { scan::token(src, at)? } else { (Kind::Space, at) };
+    if kind != Kind::Ident {
+        return Err(
+            Diagnostic::new("expected the name of the server function", at..at + 1).help(shape)
+        );
+    }
+    let name = src[at..name_end].to_string();
+    let name_span = at..name_end;
+    let open = scan::skip_trivia(src, name_end, src.len())?;
+    if !src[open..].starts_with('(') {
+        return Err(Diagnostic::new(
+            format!("expected `(` after `server fn {name}`"),
+            open..open + 1,
+        )
+        .help(shape));
+    }
+    let close = scan::find_close(src, open, src.len())?;
+    let params = parse_params(src, open + 1, close)?;
+    if let Some(p) = params.iter().find(|p| p.default.is_some()) {
+        return Err(Diagnostic::new("a server function argument has no default", p.span.clone())
+            .help("the caller passes every argument: write `name: Type`"));
+    }
+    // the body is the first `{` outside brackets: a type has none
+    let mut i = close + 1;
+    let mut depth = 0usize;
+    let body_open = loop {
+        if i >= src.len() {
+            return Err(
+                Diagnostic::new(format!("`server fn {name}` has no body"), name_span).help(shape)
+            );
+        }
+        let (kind, end) = scan::token(src, i)?;
+        match kind {
+            Kind::Open(b'{') if depth == 0 => break i,
+            Kind::Open(_) => depth += 1,
+            Kind::Close(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i = end;
+    };
+    let between = scan::skip_trivia(src, close + 1, body_open)?;
+    let ret = if between == body_open {
+        None
+    } else if let Some(rest) = src[between..body_open].strip_prefix("->") {
+        let from = between + 2 + (rest.len() - rest.trim_start().len());
+        let ty = from..between + 2 + rest.trim_end().len();
+        if ty.is_empty() {
+            return Err(
+                Diagnostic::new("expected a type after `->`", between..between + 2).help(shape)
+            );
+        }
+        if let Err(e) = syn::parse_str::<syn::Type>(&src[ty.clone()]) {
+            return Err(map_wrapped(&e, &src[ty.clone()], 0, ty.start, &src[ty.clone()]));
+        }
+        Some(ty)
+    } else {
+        return Err(Diagnostic::new("expected `->` and a type, or the body", between..body_open)
+            .help(shape));
+    };
+    let body_close = scan::find_close(src, body_open, src.len())?;
+    validate_block(src, body_open + 1..body_close)?;
+    Ok((ServerFn { name, name_span, params, ret, body: body_open..body_close + 1 }, body_close + 1))
 }
 
 fn parse_component(src: &str, after_kw: usize) -> Result<(Component, usize)> {

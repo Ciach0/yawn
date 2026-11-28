@@ -134,6 +134,13 @@
             <context sub-pattern="2" style-ref="component-tag"/>
           </include>
         </context>
+        <context id="server-fn">
+          <match>\b(server)\s+(fn)\b</match>
+          <include>
+            <context sub-pattern="1" style-ref="keyword"/>
+            <context sub-pattern="2" style-ref="keyword"/>
+          </include>
+        </context>
         <context ref="rust:rust"/>
       </include>
     </context>

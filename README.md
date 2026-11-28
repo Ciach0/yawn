@@ -54,8 +54,8 @@ them into plain Rust files you can read.
   string lists). Compiler errors show their `.rsx` location in the terminal and the browser.
 - **API routes.** A file in `src/api/` is an HTTP endpoint written as an axum handler, with no
   registration, and `yawn::http` calls it from the client.
-- **Server functions.** An async function in a `yawn::server_fn!` block in `src/fns/` runs on the
-  server; the client calls it like any other and gets the typed result back.
+- **Server functions.** A `server fn` in a `.rsx` file runs on the server; the client calls it like
+  any other async function and gets the typed result back.
 - **Production builds.** `yawn build` writes `dist/` with content-hashed file names and
   `Cache-Control: immutable` for everything the browser can keep.
 - **Static sites.** `yawn build --static` renders the pages to `.html` for a static host: every
@@ -106,7 +106,7 @@ takes about 17% more). Method, caveats and every number are in [`bench/results.m
 | `.rsx` components, signals, memos, effects, keyed lists, slots, prop defaults | generics on components |
 | SSR with hydration, head tags, data loading | `match`, `while` and `loop` in a view |
 | folder routing with layouts and params | CSS scoped to a component (`style { }` is global) |
-| API routes in `src/api/`, server functions in `src/fns/` | a stable API |
+| API routes in `src/api/`, `server fn` | a stable API |
 | `yawn dev` with state kept across rebuilds, `yawn build`, Tailwind, hashed assets | |
 | language server, tree-sitter grammar, Zed extension | |
 

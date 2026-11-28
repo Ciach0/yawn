@@ -1,3 +1,6 @@
+//! The runtime of `server fn`s in `.rsx` files: the client's call and the server's route. The
+//! compiler writes both versions of each function (see yawn-rsx's README).
+
 use std::fmt;
 
 /// Why calling a server function failed. On the server the call is a plain function call and
@@ -31,58 +34,6 @@ impl std::error::Error for Error {}
 pub fn url(module: &str, name: &str) -> String {
     let path = module.split_once("::").map_or("", |(_, rest)| rest).replace("::", "/");
     if path.is_empty() { format!("/__yawn/fn/{name}") } else { format!("/__yawn/fn/{path}/{name}") }
-}
-
-/// Async functions that run on the server and that the client calls like any other: in the
-/// client, each one sends its arguments to the server as JSON and returns the answer.
-///
-/// ```ignore
-/// // src/fns/todos.rs
-/// yawn::server_fn! {
-///     pub async fn add(title: String) -> usize {
-///         crate::server::db().insert(title)
-///     }
-/// }
-/// ```
-///
-/// `todos::add(title).await` is a `Result<usize, yawn::fns::Error>` on both sides, so a component
-/// that calls it compiles for SSR too. The blocks only work in files of `src/fns/`, which the
-/// server routes. Arguments and the answer are `serde` types; the arguments come from the browser,
-/// so check them like any request. The body is compiled for the server only, so it can use
-/// server-only code; the rest of the file is compiled for both.
-#[macro_export]
-macro_rules! server_fn {
-    ($(
-        $(#[$attr:meta])*
-        $vis:vis async fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block
-    )*) => {$(
-        #[cfg(not(target_arch = "wasm32"))]
-        $(#[$attr])*
-        $vis async fn $name($($arg: $ty),*)
-            -> ::core::result::Result<$crate::__server_fn_ret!($($ret)?), $crate::fns::Error>
-        {
-            ::core::result::Result::Ok(async move $body.await)
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        $(#[$attr])*
-        $vis async fn $name($($arg: $ty),*)
-            -> ::core::result::Result<$crate::__server_fn_ret!($($ret)?), $crate::fns::Error>
-        {
-            $crate::fns::call(::core::module_path!(), ::core::stringify!($name), &($($arg,)*)).await
-        }
-    )*};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __server_fn_ret {
-    () => {
-        ()
-    };
-    ($t:ty) => {
-        $t
-    };
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -212,18 +163,27 @@ mod tests {
         assert_eq!(url("app", "ping"), "/__yawn/fn/ping");
     }
 
+    // what the compiler writes on the server for `server fn`s
     mod declared {
-        crate::server_fn! {
-            /// Adds
-            pub async fn add(a: i32, b: i32) -> i32 { a + b }
-            pub(crate) async fn ping() {}
-            pub async fn early(n: u8,) -> Option<u8> {
+        use super::Error;
+
+        pub async fn add(a: i32, b: i32) -> Result<i32, Error> {
+            Ok(async move { a + b }.await)
+        }
+
+        pub async fn ping() -> Result<(), Error> {
+            Ok(())
+        }
+
+        pub async fn early(n: u8) -> Result<Option<u8>, Error> {
+            Ok(async move {
                 if n == 0 {
                     return None;
                 }
                 let less = n.checked_sub(1)?;
                 Some(less * 2)
             }
+            .await)
         }
     }
 

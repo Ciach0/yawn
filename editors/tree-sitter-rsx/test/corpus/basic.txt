@@ -144,3 +144,37 @@ pub component Card() {
         (string_content))
       (end_tag
         (tag_name)))))
+
+==================
+server functions
+==================
+use crate::db;
+
+pub server fn add(mut a: i32, b: Vec<(u8, u8)>) -> Result<i32, String> {
+    let server = { a };
+    Ok(server)
+}
+
+server fn ping() {}
+
+let server = 1;
+
+---
+
+(source_file
+  (rust_toplevel)
+  (server_fn
+    name: (fn_name)
+    (params
+      (param
+        name: (param_name)
+        type: (rust_type))
+      (param
+        name: (param_name)
+        type: (rust_type)))
+    return_type: (rust_head)
+    (rust_setup))
+  (server_fn
+    name: (fn_name)
+    (params))
+  (rust_toplevel))

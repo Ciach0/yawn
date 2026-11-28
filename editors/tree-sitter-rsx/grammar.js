@@ -24,7 +24,7 @@ module.exports = grammar({
   extras: $ => [/\s/, $.comment],
 
   rules: {
-    source_file: $ => repeat(choice($.rust_toplevel, $.component)),
+    source_file: $ => repeat(choice($.rust_toplevel, $.component, $.server_fn)),
 
     comment: _ => token(choice(seq('//', /[^\n]*/), seq('/*', /[^*]*\*+([^/*][^*]*\*+)*/, '/'))),
 
@@ -42,6 +42,21 @@ module.exports = grammar({
     ),
 
     component_name: _ => /[A-Z][A-Za-z0-9_]*/,
+
+    // `server fn name(arg: Type) -> Type { body }`: the return type and the body are Rust.
+    server_fn: $ => seq(
+      optional('pub'),
+      'server',
+      'fn',
+      field('name', $.fn_name),
+      $.params,
+      optional(seq('->', field('return_type', $.rust_head))),
+      '{',
+      optional($.rust_setup),
+      '}',
+    ),
+
+    fn_name: _ => /[A-Za-z_][A-Za-z0-9_]*/,
 
     params: $ => seq('(', optional(seq($.param, repeat(seq(',', $.param)), optional(','))), ')'),
 

@@ -349,3 +349,24 @@ fn ref_follows_the_element() {
         assert_eq!(input.get(), yawn::ui::element("in"));
     });
 }
+
+#[test]
+fn server_fns_run_the_body_on_the_server() {
+    use std::task::{Context, Poll, Waker};
+    use yawn_rsx_tests::server_fns;
+    // the bodies never wait, so one poll finishes them
+    fn now<F: Future>(f: F) -> F::Output {
+        match std::pin::pin!(f).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("a server fn body without awaits is ready at once"),
+        }
+    }
+    assert_eq!(now(server_fns::add(2, 3)), Ok(5));
+    assert_eq!(now(server_fns::ping()), Ok(()));
+    assert_eq!(now(server_fns::describe(vec![], ',')), Ok(Err("no words".into())));
+    assert_eq!(now(server_fns::describe(vec!["a".into(), "b".into()], ';')), Ok(Ok("a;b;".into())));
+    // axum checks the routes as they are added: three distinct paths
+    let _ = server_fns::__yawn_server_fns(yawn::server::axum::Router::new());
+    let app = mount(server_fns::Adder::default());
+    assert_eq!(text(&app, "button"), "0");
+}

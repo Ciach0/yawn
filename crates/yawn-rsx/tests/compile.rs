@@ -445,3 +445,46 @@ fn a_default_must_have_a_value() {
     let (d, _) = err("component A(x: u8 = ) { view { <b /> } }");
     assert!(d.message.contains("default needs a value"), "{}", d.message);
 }
+
+#[test]
+fn server_fn_has_a_server_and_a_client_version() {
+    let src = "use x::Y;\n/// docs\npub server fn add(mut a: i32, b: Vec<(u8, u8)>) -> Option<Y> {\n    a += 1;\n    None\n}\nserver fn ping() {}\nlet server = 1;\nmod server;\n";
+    let rust = ok(src);
+    assert!(rust.contains("/// docs\n#[cfg(not(target_arch = \"wasm32\"))]\n#[allow(clippy::unit_arg)]\npub async fn add(mut a: i32, b: Vec<(u8, u8)>) -> ::core::result::Result<Option<Y>, ::yawn::fns::Error> { ::core::result::Result::Ok(async move {\n    a += 1;"), "{rust}");
+    assert!(rust.contains("pub async fn add(a: i32, b: Vec<(u8, u8)>) -> ::core::result::Result<Option<Y>, ::yawn::fns::Error> { ::yawn::fns::call(::core::module_path!(), \"add\", &(a, b, )).await }"), "{rust}");
+    assert!(
+        rust.contains("pub async fn ping() -> ::core::result::Result<(), ::yawn::fns::Error>"),
+        "{rust}"
+    );
+    assert!(rust.contains(".route(&::yawn::fns::url(::core::module_path!(), \"ping\"), ::yawn::fns::handler(ping))"), "{rust}");
+    assert!(
+        rust.contains("let server = 1;\nmod server;"),
+        "`server` without `fn` is plain Rust\n{rust}"
+    );
+    assert!(!ok("server fn x() {}").is_empty() && !ok("fn a() {}").contains("__yawn_server_fns"));
+    let c = compile(src, "t.rsx").unwrap();
+    let body = c.rust.find("    a += 1;").unwrap();
+    let line = c.rust[..body].matches('\n').count() + 1;
+    assert_eq!(c.map.map(line as u32, 5), Some((4, 5)), "the body maps to its .rsx lines");
+}
+
+#[test]
+fn server_fn_errors() {
+    let src = "server fn add(a: i32 = 1) {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("no default"), "{}", d.message);
+    assert_eq!(pointed(src, &d), "a: i32 = 1");
+    let src = "server fn add(a: i32) => i32 {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("expected `->`"), "{}", d.message);
+    let src = "server fn add(a: i32) -> {}";
+    let (d, _) = err(src);
+    assert_eq!((d.message.as_str(), pointed(src, &d)), ("expected a type after `->`", "->"));
+    let (d, _) = err("server fn (a: i32) {}");
+    assert!(d.message.contains("name of the server function"), "{}", d.message);
+    let (d, _) = err("server fn add(a: i32) -> u8");
+    assert!(d.message.contains("has no body"), "{}", d.message);
+    let src = "server fn add() { let = 1; }";
+    let (d, _) = err(src);
+    assert_eq!(pointed(src, &d), "=");
+}

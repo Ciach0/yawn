@@ -198,12 +198,13 @@ pub fn mod_decl(dir: &Path) -> String {
     )
 }
 
-/// A module tree as real files in `dir`: a `mod.rs` per folder, each naming its files by `#[path]`
-/// (`[id].rs` isn't a module name). The root `mod.rs` comes last, for the caller to add to.
-pub(crate) fn module_tree(dir: &Path, modules: &[(&[String], PathBuf)]) -> Vec<(PathBuf, String)> {
+/// The `api` module as real files in `dir`: a `mod.rs` per folder (the endpoints as modules by
+/// `#[path]`, since `[id].rs` isn't a module name) and, in the root one, the router that serves
+/// them
+pub fn module_files(dir: &Path, endpoints: &[Endpoint]) -> Vec<(PathBuf, String)> {
     let mut root = Tree::default();
-    for (i, (module, _)) in modules.iter().enumerate() {
-        let (file, dirs) = module.split_last().expect("a module path");
+    for (i, e) in endpoints.iter().enumerate() {
+        let (file, dirs) = e.module.split_last().expect("a module path");
         let mut t = &mut root;
         for d in dirs {
             t = t.dirs.entry(d.clone()).or_default();
@@ -212,7 +213,7 @@ pub(crate) fn module_tree(dir: &Path, modules: &[(&[String], PathBuf)]) -> Vec<(
     }
     fn mods(
         t: &Tree,
-        modules: &[(&[String], PathBuf)],
+        endpoints: &[Endpoint],
         dir: &Path,
         out: &mut Vec<(PathBuf, String)>,
     ) -> String {
@@ -220,12 +221,12 @@ pub(crate) fn module_tree(dir: &Path, modules: &[(&[String], PathBuf)]) -> Vec<(
         for (name, i) in &t.files {
             text.push_str(&format!(
                 "#[path = {:?}]\npub mod {name};\n",
-                crate::project::slashed(&modules[*i].1)
+                crate::project::slashed(&crate::mirror::redirect(&endpoints[*i].file))
             ));
         }
         for (name, sub) in &t.dirs {
             let sub_dir = dir.join(name);
-            let sub_text = mods(sub, modules, &sub_dir, out);
+            let sub_text = mods(sub, endpoints, &sub_dir, out);
             let mod_rs = sub_dir.join("mod.rs");
             text.push_str(&format!(
                 "#[path = {:?}]\npub mod {name};\n",
@@ -236,18 +237,7 @@ pub(crate) fn module_tree(dir: &Path, modules: &[(&[String], PathBuf)]) -> Vec<(
         text
     }
     let mut files = Vec::new();
-    let text = mods(&root, modules, dir, &mut files);
-    files.push((dir.join("mod.rs"), text));
-    files
-}
-
-/// The `api` module as real files in `dir` (see `module_tree`), with the router that serves the
-/// endpoints in the root one
-pub fn module_files(dir: &Path, endpoints: &[Endpoint]) -> Vec<(PathBuf, String)> {
-    let modules: Vec<_> =
-        endpoints.iter().map(|e| (e.module.as_slice(), crate::mirror::redirect(&e.file))).collect();
-    let mut files = module_tree(dir, &modules);
-    let text = &mut files.last_mut().expect("the root module").1;
+    let mut text = mods(&root, endpoints, dir, &mut files);
     text.push_str("\n/// The routes of `src/api/`.\npub fn router() -> ::yawn::server::axum::Router {\n    ::yawn::server::axum::Router::new()\n");
     for e in endpoints.iter().filter(|e| !e.methods.is_empty()) {
         let handler = |m: &str| format!("self::{}::{m}", e.module.join("::"));
@@ -262,6 +252,7 @@ pub fn module_files(dir: &Path, endpoints: &[Endpoint]) -> Vec<(PathBuf, String)
         text.push_str(&format!("        .route({:?}, {chain})\n", e.path));
     }
     text.push_str("}\n");
+    files.push((dir.join("mod.rs"), text));
     files
 }
 

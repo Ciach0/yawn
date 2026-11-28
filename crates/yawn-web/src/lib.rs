@@ -29,7 +29,7 @@ pub mod protocol;
 #[cfg(feature = "http")]
 pub mod http;
 
-/// Server functions: [`server_fn!`] blocks in `src/fns/` the client calls over HTTP (feature
+/// What `server fn`s in `.rsx` files compile to: the client calls them over HTTP (feature
 /// `server`, on by default, or `json`)
 #[cfg(any(feature = "server", feature = "json"))]
 pub mod fns;

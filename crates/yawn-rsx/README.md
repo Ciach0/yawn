@@ -43,6 +43,7 @@ component Counter() {                 // props are fields: `component Card(title
 | `if let PAT = value { } else { }` | like `if`, with the pattern's bindings in scope; rebuilt whenever `value` changes (so its type needs `Clone + PartialEq`), not only when the pattern starts or stops matching |
 | `for pat in expr key keyexpr { }` | keyed list: rows are built once per key, moved (not rebuilt) on reorder, disposed on removal |
 | `style { css }` | plain CSS in the component (after or before `view`), global, written to `/pkg/rsx.css` which the dev server links automatically |
+| `server fn name(arg: T) -> R { }` | outside components: runs on the server, the client calls it like an async function (see [Server functions](#server-functions-server-fn)) |
 | `name: Class` (prop) | `Class` (`Prop<String>`) takes `class="x"`, `class="a {x}"` and `class={sig.into()}` (a signal or memo); read it as `{class}` in a view and the page follows the signal. `.and("b")` and `.when(|| cond, "c")` join names. `Prop<T>` is the same for any type; a `&'static str` prop takes literals only. Interpolated text props go through `Into`, `{expr}` props don't: write `.into()` |
 | `<slot />` | where a component with a `children: Children` prop places what was written between its tags. `<slot name="x" />` places the prop `x: Children`, which the caller fills with `slot="x"` on a child (`<b slot="x">`) or with the contents of `<template slot="x">`; anything without a `slot` goes to `children`. A slot is built each time it's placed, so one inside `if` follows the branch (captured Strings must be signals, as in any branch) |
 
@@ -134,33 +135,37 @@ A file with no handler, a name that isn't a valid route, and two files that make
 are errors. The endpoints are merged into the app before `server::configure`, which stays for
 middleware, state and anything else that isn't a file.
 
-## Server functions (`src/fns/`)
+## Server functions (`server fn`)
 
-Files in `src/fns/` are modules of `crate::fns`, compiled for both sides. An async function in a
-`yawn::server_fn!` block at the top level of one runs on the server, and the client calls it like
-any other: the generated client version posts the arguments as JSON to
-`/__yawn/fn/<module path>/<name>` and returns the answer.
+A `server fn` in any `.rsx` file runs on the server, and the client calls it like any other async
+function:
 
 ```rust
-// src/fns/todos.rs
-yawn::server_fn! {
-    pub async fn add(title: String) -> usize {
-        crate::server::db().insert(title)
+// src/todos.rsx  ->  crate::todos::add
+server fn add(title: String) -> usize {
+    crate::server::db().insert(title)
+}
+
+component NewTodo() {
+    let count = signal(0);
+    view {
+        <button on:click={move || spawn(add("milk".into()), move |r| count.set(r.unwrap_or(0)))}>"add"</button>
     }
 }
 ```
 
-```rust
-// a component
-spawn(fns::todos::add(title.get()), move |r| count.set(r.unwrap_or(0)));
-```
+The compiler writes two functions with the signature `pub async fn add(title: String) ->
+Result<usize, yawn::fns::Error>`: the server's runs the body, the client's posts the arguments as
+JSON to `/__yawn/fn/todos/add` and returns the answer. Both return `Result`, so a component that calls
+one compiles for SSR too; on the server the call is a direct call and never fails. The server binary
+routes every `server fn` of the project.
 
-`add` returns `Result<usize, yawn::fns::Error>` on both sides, so components that call it compile
-for SSR as well; on the server the call is a direct call and never fails. Arguments and results are
-`serde` types. Only the bodies are server-only: imports they alone need go inside them or behind
-`#[cfg(not(target_arch = "wasm32"))]`. The arguments come from the browser, so validate them as
-you would any request. The server answers only `application/json` requests, which a cross-site form
-can't send.
+- Arguments are `name: Type` and, like the result, `serde` types. They come from the browser:
+  validate them as you would any request.
+- The body is async (`.await` works) and compiled for the server only. Imports it alone needs go
+  inside it, or behind `#[cfg(not(target_arch = "wasm32"))]`: the rest of the file is compiled for
+  the client as well.
+- The server answers only `application/json` requests, which a cross-site form can't send.
 
-Not supported yet: generics, argument patterns (`(a, b): (u8, u8)`), streaming, and `server_fn!`
-outside `src/fns/` (it compiles, but the server has no route for it).
+Not supported yet: generics, argument patterns (`(a, b): (u8, u8)`), streaming, and defining one in
+a plain `.rs` file.

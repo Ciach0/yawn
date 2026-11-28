@@ -12,6 +12,19 @@ pub enum Item {
     /// Plain Rust (imports, helper functions, structs...), copied unchanged
     Rust(Span),
     Component(Component),
+    ServerFn(ServerFn),
+}
+
+/// `server fn name(params) -> Type { body }`: runs on the server, the client calls it over HTTP
+#[derive(Debug, Clone)]
+pub struct ServerFn {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Param>,
+    /// The type after `->`
+    pub ret: Option<Span>,
+    /// The body, braces included
+    pub body: Span,
 }
 
 #[derive(Debug, Clone)]

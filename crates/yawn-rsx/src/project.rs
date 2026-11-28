@@ -81,14 +81,8 @@ pub fn client_root(root: &Path, main_rust: &str) -> String {
         }
         _ => String::new(),
     };
-    let fns = match crate::fns::scan(root) {
-        Ok(m) if !m.is_empty() => {
-            crate::fns::mod_decl(&root.join(OUT_DIR).join(crate::fns::MODULE_DIR))
-        }
-        _ => String::new(),
-    };
     format!(
-        "{body}{}{api}{fns}\ninclude!(\"rsx/modules.rs\");\n\n#[cfg(target_arch = \"wasm32\")]\nyawn::client!(App);\n",
+        "{body}{}{api}\ninclude!(\"rsx/modules.rs\");\n\n#[cfg(target_arch = \"wasm32\")]\nyawn::client!(App);\n",
         server_mod(root)
     )
 }
@@ -136,17 +130,22 @@ fn path_mod_in(dir: &Path, line: &str) -> String {
     line.to_string()
 }
 
-fn server_root(root: &Path) -> String {
+/// The server binary; `fn_modules` are the modules with `server fn`s (`[]` is `main.rsx`)
+fn server_root(root: &Path, fn_modules: &[Vec<String>]) -> String {
     let api = if crate::api::scan(root).is_ok_and(|e| e.iter().any(|e| !e.methods.is_empty())) {
         "let app = app.merge(yawn_app::api::router());\n    "
     } else {
         ""
     };
-    let fns = if crate::fns::scan(root).is_ok_and(|m| m.iter().any(|m| !m.fns.is_empty())) {
-        "let app = app.merge(yawn_app::fns::router());\n    "
-    } else {
-        ""
-    };
+    let mut fns = String::new();
+    if !fn_modules.is_empty() {
+        fns.push_str("let fns = ::yawn::server::axum::Router::new();\n    ");
+        for m in fn_modules {
+            let path: String = m.iter().map(|p| format!("::{p}")).collect();
+            fns.push_str(&format!("let fns = yawn_app{path}::__yawn_server_fns(fns);\n    "));
+        }
+        fns.push_str("let app = app.merge(fns);\n    ");
+    }
     let configure = if server_file(root).is_some() {
         "let app = yawn_app::server::configure(app);\n    "
     } else {
@@ -277,6 +276,7 @@ struct CachedFile {
     rust: String,
     css: String,
     map: String,
+    server_fns: bool,
 }
 
 /// The files compiled earlier in this process: `yawn dev` compiles the whole project after every
@@ -519,6 +519,7 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
     let mut router = false;
     let folders = folders_enabled(root);
     let mut route_files: Vec<crate::routes::Route> = Vec::new();
+    let mut fn_modules: Vec<Vec<String>> = Vec::new();
     for rel in &sources {
         let display = format!("src/{rel}");
         let stem = rel.trim_end_matches(".rsx");
@@ -546,18 +547,18 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
                     let map_text = SourceMap { source: display.clone(), ..c.map }.to_text();
                     // the client root is written below, once the module list is known (the split may move modules out of it)
                     client_text = Some(client_root(root, &c.rust));
-                    let wrote = write_if_changed(&root.join(SERVER_ROOT), &server_root(root))
-                        .and_then(|a| write_if_changed(&map_path, &map_text).map(|b| a || b));
-                    match wrote {
+                    if c.server_fns {
+                        fn_modules.push(Vec::new());
+                    }
+                    match write_if_changed(&map_path, &map_text) {
                         Ok(changed) => report.written += changed as usize,
                         Err(e) => errors
                             .push(problem(&display, format!("cannot write generated code: {e}"))),
                     }
-                    let problems = crate::api::scan(root).err().into_iter().flatten();
-                    for (path, message) in
-                        problems.chain(crate::fns::scan(root).err().into_iter().flatten())
-                    {
-                        errors.push(problem(&path, message));
+                    if let Err(problems) = crate::api::scan(root) {
+                        for (path, message) in problems {
+                            errors.push(problem(&path, message));
+                        }
                     }
                     router = folders && sources.iter().any(|s| s.starts_with("routes/"));
                     for old in
@@ -647,7 +648,7 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
             c.get(&abs).filter(|f| f.source == source_key && f.known == known_key).cloned()
         });
         let compiled = match cached {
-            Some(f) => Ok((f.rust, f.css, f.map)),
+            Some(f) => Ok((f.rust, f.css, f.map, f.server_fns)),
             None => crate::compile_with(&source, &display, &known).map(|c| {
                 let map = SourceMap { source: display.clone(), ..c.map }.to_text();
                 if let Ok(mut files) = compiled_files().lock() {
@@ -659,14 +660,15 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
                             rust: c.rust.clone(),
                             css: c.css.clone(),
                             map: map.clone(),
+                            server_fns: c.server_fns,
                         },
                     );
                 }
-                (c.rust, c.css, map)
+                (c.rust, c.css, map, c.server_fns)
             }),
         };
         match compiled {
-            Ok((rust, file_css, map_text)) => {
+            Ok((rust, file_css, map_text, server_fns)) => {
                 css.push_str(&file_css);
                 let gen_path = out.join(&rust_name);
                 let map_path = out.join(format!("{stem}.map"));
@@ -681,10 +683,22 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
                 }
                 keep.push(gen_path.clone());
                 keep.push(map_path);
+                if server_fns {
+                    fn_modules.push(module.clone());
+                }
                 modules.insert(module, gen_path);
                 report.sources.push(display);
             }
             Err(diagnostic) => errors.push(FileDiagnostic { path: display, source, diagnostic }),
+        }
+    }
+    // written once every file is compiled: it routes the server functions of all of them
+    if client_text.is_some() {
+        match write_if_changed(&root.join(SERVER_ROOT), &server_root(root, &fn_modules)) {
+            Ok(changed) => report.written += changed as usize,
+            Err(e) => {
+                errors.push(problem(SERVER_ROOT, format!("cannot write generated code: {e}")))
+            }
         }
     }
     if !errors.is_empty() {
@@ -730,11 +744,6 @@ fn compile_own(root: &Path, split: bool) -> Result<Report, Vec<FileDiagnostic>> 
     {
         folder_files
             .extend(crate::api::module_files(&out.join(crate::api::MODULE_DIR), &endpoints));
-    }
-    if let Ok(modules) = crate::fns::scan(root)
-        && !modules.is_empty()
-    {
-        folder_files.extend(crate::fns::module_files(&out.join(crate::fns::MODULE_DIR), &modules));
     }
     match crate::mirror::write_all(root, &mut keep) {
         Ok(n) => report.written += n,
@@ -1004,36 +1013,21 @@ mod path_mod_tests {
     }
 
     #[test]
-    fn server_fns_are_on_both_sides_and_routed_by_the_server() {
-        let root = std::env::temp_dir().join(format!("yawn-rsx-fns-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src/fns")).unwrap();
-        fs::write(root.join("src/fns/shared.rs"), "pub struct Todo;").unwrap();
-        assert!(!server_root(&root).contains("fns::router"), "no function, no routes");
-        fs::write(
-            root.join("src/fns/todos.rs"),
-            "yawn::server_fn! { pub async fn n() -> u8 { 1 } }",
-        )
-        .unwrap();
-        assert!(server_root(&root).contains("app.merge(yawn_app::fns::router())"));
-        let client = client_root(&root, "");
-        let decl = client.split("pub mod fns;").next().unwrap();
-        assert!(
-            decl.ends_with("_fns/mod.rs\"]\n"),
-            "no cfg: the client calls through it\n{client}"
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn api_files_are_wired_into_both_roots() {
         let root = std::env::temp_dir().join(format!("yawn-rsx-api-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src/api")).unwrap();
-        assert!(!server_root(&root).contains("api::router"));
+        assert!(!server_root(&root, &[]).contains("api::router"));
         fs::write(root.join("src/api/ping.rs"), "pub async fn get() -> &'static str { \"pong\" }")
             .unwrap();
-        assert!(server_root(&root).contains("app.merge(yawn_app::api::router())"));
+        assert!(server_root(&root, &[]).contains("app.merge(yawn_app::api::router())"));
+        let fns = server_root(&root, &[vec![], vec!["todos".into()]]);
+        assert!(
+            fns.contains("let fns = yawn_app::__yawn_server_fns(fns);")
+                && fns.contains("let fns = yawn_app::todos::__yawn_server_fns(fns);")
+                && fns.contains("let app = app.merge(fns);"),
+            "{fns}"
+        );
         let client = client_root(&root, "");
         assert!(client.contains("pub mod api;") && client.contains("_api/mod.rs"), "{client}");
         // the module is a real file: rust-analyzer can't follow `#[path]` in an inline module
@@ -1053,10 +1047,10 @@ mod path_mod_tests {
         let root = std::env::temp_dir().join(format!("yawn-rsx-server-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
-        assert!(!server_root(&root).contains("configure"));
+        assert!(!server_root(&root, &[]).contains("configure"));
         assert!(!client_root(&root, "").contains("pub mod server"));
         fs::write(root.join("src/server.rs"), "").unwrap();
-        assert!(server_root(&root).contains("yawn_app::server::configure(app)"));
+        assert!(server_root(&root, &[]).contains("yawn_app::server::configure(app)"));
         let client = client_root(&root, "");
         assert!(
             client.contains("not(target_arch = \"wasm32\")") && client.contains("pub mod server;"),
