@@ -17,7 +17,7 @@ default = ["server"]
 json = ["dep:serde", "dep:serde_json"]
 config = ["dep:serde", "dep:toml"]
 http = ["dep:serde", "dep:serde_json", "dep:form_urlencoded", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:hyper-rustls", "dep:rustls", "dep:webpki-roots", "dep:tokio"]
-server = ["config", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tokio-stream", "dep:tower-http", "dep:serde_json", "dep:libc", "dep:sha2"]
+server = ["config", "dep:serde", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tokio-stream", "dep:tower-http", "dep:serde_json", "dep:libc", "dep:sha2"]
 
 [dependencies]
 yawn-reactivity.workspace = true

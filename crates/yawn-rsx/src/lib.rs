@@ -22,6 +22,7 @@ pub mod api;
 pub mod ast;
 pub mod codegen;
 pub mod diag;
+pub mod fns;
 pub mod hotfn;
 pub mod manifest;
 pub mod mirror;

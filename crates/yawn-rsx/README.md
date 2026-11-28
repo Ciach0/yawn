@@ -133,3 +133,34 @@ pub async fn get(Path(id): Path<String>) -> Json<String> {
 A file with no handler, a name that isn't a valid route, and two files that make the same route
 are errors. The endpoints are merged into the app before `server::configure`, which stays for
 middleware, state and anything else that isn't a file.
+
+## Server functions (`src/fns/`)
+
+Files in `src/fns/` are modules of `crate::fns`, compiled for both sides. An async function in a
+`yawn::server_fn!` block at the top level of one runs on the server, and the client calls it like
+any other: the generated client version posts the arguments as JSON to
+`/__yawn/fn/<module path>/<name>` and returns the answer.
+
+```rust
+// src/fns/todos.rs
+yawn::server_fn! {
+    pub async fn add(title: String) -> usize {
+        crate::server::db().insert(title)
+    }
+}
+```
+
+```rust
+// a component
+spawn(fns::todos::add(title.get()), move |r| count.set(r.unwrap_or(0)));
+```
+
+`add` returns `Result<usize, yawn::fns::Error>` on both sides, so components that call it compile
+for SSR as well; on the server the call is a direct call and never fails. Arguments and results are
+`serde` types. Only the bodies are server-only: imports they alone need go inside them or behind
+`#[cfg(not(target_arch = "wasm32"))]`. The arguments come from the browser, so validate them as
+you would any request. The server answers only `application/json` requests, which a cross-site form
+can't send.
+
+Not supported yet: generics, argument patterns (`(a, b): (u8, u8)`), streaming, and `server_fn!`
+outside `src/fns/` (it compiles, but the server has no route for it).

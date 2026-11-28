@@ -29,6 +29,11 @@ pub mod protocol;
 #[cfg(feature = "http")]
 pub mod http;
 
+/// Server functions: [`server_fn!`] blocks in `src/fns/` the client calls over HTTP (feature
+/// `server`, on by default, or `json`)
+#[cfg(any(feature = "server", feature = "json"))]
+pub mod fns;
+
 /// Values handed down to what a component builds: [`provide`](context::provide) and
 /// [`use_context`](context::use_context)
 pub mod context;
