@@ -594,6 +594,13 @@ impl Dev {
     }
 
     fn build(&mut self, cs: &ChangeSet, errors: &mut Vec<String>) -> bool {
+        let promoted;
+        let cs = if self.promotable(cs) {
+            promoted = ChangeSet { client: true, server: false, ..cs.clone() };
+            &promoted
+        } else {
+            cs
+        };
         self.build_id += 1;
         let id = self.build_id;
         let target = match (cs.client, cs.server) {
@@ -1148,6 +1155,38 @@ impl Dev {
             );
         }
         ok
+    }
+
+    /// Whether a change of server files that had no mirror yet (a new file) can go through the
+    /// module swap after all: once the sources are compiled, each of them has one
+    fn promotable(&mut self, cs: &ChangeSet) -> bool {
+        if !cs.server
+            || cs.initial
+            || cs.restart
+            || cs.files.is_empty()
+            || self.dynamic.is_none()
+            || self.server_exe.is_none()
+        {
+            return false;
+        }
+        let handler = |f: &PathBuf| {
+            f.extension().is_some_and(|e| e == "rs")
+                && (f.starts_with("src/api")
+                    || f.starts_with("src/server")
+                    || f == Path::new("src/server.rs"))
+        };
+        if !cs.files.iter().all(handler) {
+            return false;
+        }
+        let (mut errors, mut counts) = (Vec::new(), (0u32, 0u32));
+        if !self.compile_rsx(&mut errors, &mut counts) {
+            return false;
+        }
+        let mirrors =
+            self.project.root.join(yawn_rsx::project::OUT_DIR).join(yawn_rsx::mirror::DIR);
+        cs.files
+            .iter()
+            .all(|f| f.strip_prefix("src").is_ok_and(|under| mirrors.join(under).is_file()))
     }
 
     fn compile_rsx(&mut self, errors: &mut Vec<String>, counts: &mut (u32, u32)) -> bool {

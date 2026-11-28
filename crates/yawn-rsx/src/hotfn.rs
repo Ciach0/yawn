@@ -467,6 +467,7 @@ struct Work<'a> {
     handlers: bool,
     async_all: bool,
     item_ranges: Vec<(usize, usize)>,
+    uses: Vec<(usize, usize)>,
     items_known: bool,
 }
 
@@ -595,7 +596,7 @@ fn includes_rewritten(text: &str, dir: &Path) -> Option<String> {
         out.push_str(&rest[..i + len]);
         rest = &rest[i + len..];
         let trimmed = rest.trim_start();
-        let Some(inner) = trimmed.strip_prefix('(') else { return None };
+        let inner = trimmed.strip_prefix('(')?;
         out.push_str(&rest[..rest.len() - trimmed.len() + 1]);
         let inner_trim = inner.trim_start();
         let mut lead = inner[..inner.len() - inner_trim.len()].to_string();
@@ -603,15 +604,15 @@ fn includes_rewritten(text: &str, dir: &Path) -> Option<String> {
         let mut joined = false;
         if let Some(r) = inner_trim.strip_prefix("concat!") {
             let r = r.trim_start();
-            let Some(r) = r.strip_prefix('(') else { return None };
+            let r = r.strip_prefix('(')?;
             let r_trim = r.trim_start();
             lead.push_str("concat!(");
             lead.push_str(&r[..r.len() - r_trim.len()]);
             inner_trim = r_trim;
             joined = true;
         }
-        let Some(lit) = inner_trim.strip_prefix('"') else { return None };
-        let Some(end) = lit.find('"') else { return None };
+        let lit = inner_trim.strip_prefix('"')?;
+        let end = lit.find('"')?;
         let path = &lit[..end];
         if path.contains('\\') {
             return None;
@@ -664,12 +665,19 @@ pub fn transform(text: &str, source_dir: &Path, unit: &str) -> Option<String> {
             || Path::new(unit) == Path::new("server.rs"),
         async_all: ASYNC_ALL.load(std::sync::atomic::Ordering::Relaxed),
         item_ranges: Vec::new(),
+        uses: Vec::new(),
         items_known: true,
     };
     for item in &file.items {
+        let private_use =
+            matches!(item, syn::Item::Use(u) if matches!(u.vis, syn::Visibility::Inherited));
         match item_range(&text, &work.starts, item) {
+            Some(r) if private_use => work.uses.push(r),
             Some(r) => work.item_ranges.push(r),
             None => work.items_known = false,
+        }
+        if private_use {
+            continue;
         }
         match item {
             syn::Item::Fn(f) => {
@@ -710,11 +718,17 @@ pub fn transform(text: &str, source_dir: &Path, unit: &str) -> Option<String> {
         if work.items_known && !unit.is_empty() {
             let mut items = item_hashes(&text, &work.item_ranges, &[]);
             items.sort();
+            let mut uses = work.uses.clone();
+            uses.sort();
+            let skeleton = without_bodies(&cut(&text, &uses)?);
             let mut out = text.clone();
             if !out.ends_with('\n') {
                 out.push('\n');
             }
             out.push_str(&format!("{ITEMS}{}\n", items.join(" ")));
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&skeleton, &mut h);
+            out.push_str(&format!("{SKELETON}{:016x}\n", std::hash::Hasher::finish(&h)));
             return Some(out);
         }
         return Some(text);
@@ -766,18 +780,29 @@ fn without_bodies(text: &str) -> String {
     out
 }
 
+/// `text` without the given ranges (sorted, not overlapping)
+fn cut(text: &str, ranges: &[(usize, usize)]) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for &(a, b) in ranges {
+        out.push_str(text.get(last..a.max(last))?);
+        last = b.max(last);
+        if text.get(last..).is_some_and(|rest| rest.starts_with('\n')) {
+            last += 1;
+        }
+    }
+    out.push_str(text.get(last..)?);
+    Some(out)
+}
+
 fn finish(work: Work<'_>, unit: &str) -> Option<String> {
     let text = work.text;
     let mut cuts = work.skeleton.clone();
     cuts.sort();
-    let mut skeleton = String::new();
-    let mut last = 0;
-    for (a, b) in &cuts {
-        skeleton.push_str(text.get(last..*a)?);
-        last = *b;
-    }
-    skeleton.push_str(text.get(last..)?);
-    let skeleton = without_bodies(&skeleton);
+    let mut with_uses = cuts.clone();
+    with_uses.extend(work.uses.iter().copied());
+    with_uses.sort();
+    let skeleton = without_bodies(&cut(text, &with_uses)?);
     let items: Option<Vec<String>> =
         work.items_known.then(|| item_hashes(text, &work.item_ranges, &cuts));
     let mut edits = work.edits;
@@ -935,5 +960,15 @@ impl fmt::Display for Entry {
         assert_ne!(a, b);
         assert_eq!(tail(&a), tail(&b));
         assert_ne!(tail(&a), tail(&c));
+    }
+
+    #[test]
+    fn a_private_use_edit_keeps_the_skeleton() {
+        let tail = |t: &str| t.lines().last().unwrap().to_string();
+        let a = transform(SAMPLE, Path::new("/p/src"), "m").unwrap();
+        let b =
+            transform(&format!("use std::fmt::Write as _;\n{SAMPLE}"), Path::new("/p/src"), "m")
+                .unwrap();
+        assert_eq!(tail(&a), tail(&b));
     }
 }

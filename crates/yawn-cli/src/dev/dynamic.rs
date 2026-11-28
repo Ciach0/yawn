@@ -107,6 +107,8 @@ pub struct Dynamic {
     pub overlay: Arc<Overlay>,
     pub native_overlay: Arc<Overlay>,
     side_exports: BTreeSet<String>,
+    app_exe: Option<PathBuf>,
+    app_statics: Option<((std::time::SystemTime, u64), Option<BTreeSet<String>>)>,
 }
 
 type Sigs = BTreeMap<PathBuf, BTreeMap<String, String>>;
@@ -325,6 +327,8 @@ impl Dynamic {
             overlay: Overlay::new(dev_dir.join("overlay-wasm")),
             native_overlay: Overlay::new(dev_dir.join("overlay-native")),
             side_exports: BTreeSet::new(),
+            app_exe: None,
+            app_statics: None,
         };
         d.overlay.clear();
         d.native_overlay.clear();
@@ -465,6 +469,7 @@ impl Dynamic {
             return Plan::Full("no baseline".into());
         };
         let mut changed = Vec::new();
+        let mut fresh: Vec<PathBuf> = Vec::new();
         for (path, now) in &next {
             match prev.get(path) {
                 Some(before) if before == now => {}
@@ -477,11 +482,36 @@ impl Dynamic {
                     return Plan::Full(format!("{} changed outside a body", path.display()));
                 }
                 Some(_) => changed.push(path.clone()),
-                None => return Plan::Full(format!("{} is new", path.display())),
+                None => fresh.push(path.clone()),
             }
         }
         if prev.keys().any(|p| !next.contains_key(p)) {
             return Plan::Full("a file went away".into());
+        }
+        let mut skipped: Vec<PathBuf> = Vec::new();
+        for path in fresh {
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some("mod") => path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+                other => other,
+            };
+            let declared = stem.is_some_and(|stem| {
+                additive.iter().any(|file| {
+                    std::fs::read_to_string(file).is_ok_and(|text| {
+                        text.lines().any(|l| l.contains("mod ") && mentions(l, stem))
+                    })
+                })
+            });
+            if !declared {
+                skipped.push(path);
+                continue;
+            }
+            additive.insert(path.clone());
+            changed.push(path);
+        }
+        if let Some(known) = self.snapshot.as_mut() {
+            for path in &skipped {
+                known.remove(path);
+            }
         }
         if changed.is_empty() {
             return Plan::Nothing;
@@ -509,7 +539,7 @@ impl Dynamic {
                 })
                 .collect();
             let changed_set: BTreeSet<&PathBuf> = changed.iter().collect();
-            for (path, _) in &next {
+            for path in next.keys() {
                 if changed_set.contains(path) {
                     continue;
                 }
@@ -770,6 +800,7 @@ impl Dynamic {
         let fallback = |why: &str| SideError::Fallback(why.to_string());
         let work = dev_dir.join("native");
         let tmp = work.join(format!("{key}.objects"));
+        let known = self.app_statics();
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).map_err(|e| fallback(&e.to_string()))?;
         let mut objects = Vec::new();
@@ -778,7 +809,7 @@ impl Dynamic {
             let data = std::fs::read(rlib).map_err(|e| fallback(&e.to_string()))?;
             for (i, (name, body)) in ar_objects(&data).into_iter().enumerate() {
                 let path = tmp.join(format!("{n}-{i}-{}", name.replace('/', "_")));
-                let body = elf_unshare(body).map_err(|e| fallback(&e))?;
+                let body = elf_unshare(body, known.as_ref()).map_err(|e| fallback(&e))?;
                 std::fs::write(&path, body).map_err(|e| fallback(&e.to_string()))?;
                 if *lazily { lazy.push(path) } else { objects.push(path) }
             }
@@ -824,10 +855,10 @@ impl Dynamic {
             return Err(fallback(&String::from_utf8_lossy(&linked.stderr)));
         }
         self.native.retain(|(d, old)| {
-            if d == &key {
+            if d == key {
                 let _ = std::fs::remove_file(old);
             }
-            d != &key
+            d != key
         });
         self.native.push((key.to_string(), out));
         let list: Vec<String> =
@@ -1109,11 +1140,11 @@ impl Dynamic {
             })
             .unwrap_or_default();
         for (route, url) in &modules {
-            if route == &key && *url != file {
+            if route == key && *url != file {
                 let _ = std::fs::remove_file(dir.join(url));
             }
         }
-        modules.retain(|(route, _)| route != &key);
+        modules.retain(|(route, _)| route != key);
         modules.push((key.to_string(), file));
         let json = serde_json::json!({
             "modules": modules.iter().map(|(r, u)| serde_json::json!({"route": r, "url": u})).collect::<Vec<_>>()
@@ -1202,6 +1233,7 @@ impl Dynamic {
         if !cfg!(target_os = "linux") {
             return Ok(false);
         }
+        self.app_exe = Some(exe.to_path_buf());
         let mut wanted = BTreeSet::new();
         for leaf in self.crates() {
             let krate = leaf.package.replace('-', "_");
@@ -1227,6 +1259,22 @@ impl Dynamic {
         relink_copy(&bin.out_dir.join(name), exe)?;
         self.server_exports = wanted;
         Ok(true)
+    }
+
+    /// The mirrored statics the running server defines, so a static that is new since its build stays
+    /// in the route library that introduces it. `None` when the server cannot be read
+    fn app_statics(&mut self) -> Option<BTreeSet<String>> {
+        let exe = self.app_exe.clone()?;
+        let meta = std::fs::metadata(&exe).ok()?;
+        let stamp = (meta.modified().ok()?, meta.len());
+        if let Some((seen, set)) = &self.app_statics
+            && *seen == stamp
+        {
+            return set.clone();
+        }
+        let set = elf_names(&exe, "__yawn_s_");
+        self.app_statics = Some((stamp, set.clone()));
+        set
     }
 
     /// Whether the crate has statics a library of its own could not share with the server
@@ -1674,7 +1722,7 @@ impl<'a> Elf<'a> {
 }
 
 /// Walks the symbols of a 64 bit ELF object; with `rewrite` the mutable statics become undefined
-fn elf_symbols(d: &mut [u8], rewrite: bool) -> Option<Scan> {
+fn elf_symbols(d: &mut [u8], rewrite: bool, known: Option<&BTreeSet<String>>) -> Option<Scan> {
     if d.get(..4)? != b"\x7fELF" || d.get(4) != Some(&2) {
         return None;
     }
@@ -1742,8 +1790,12 @@ fn elf_symbols(d: &mut [u8], rewrite: bool) -> Option<Scan> {
                         scan.unshareable = true;
                         scan.reasons.push(format!("tls {n}"));
                     } else if kind == 1 && !n.starts_with("DW.ref.") {
+                        let new_here =
+                            n.starts_with("__yawn_s_") && known.is_some_and(|k| !k.contains(&n));
                         scan.writable.insert(n);
-                        patches.push(at);
+                        if !new_here {
+                            patches.push(at);
+                        }
                     }
                 }
             }
@@ -1758,16 +1810,80 @@ fn elf_symbols(d: &mut [u8], rewrite: bool) -> Option<Scan> {
     Some(scan)
 }
 
+/// The defined symbols of an ELF file that start with `prefix`, read from its symbol table alone
+/// (the file itself can be hundreds of megabytes)
+fn elf_names(path: &Path, prefix: &str) -> Option<BTreeSet<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 64];
+    f.read_exact(&mut head).ok()?;
+    if &head[..4] != b"\x7fELF" || head[4] != 2 {
+        return None;
+    }
+    let u16_at = |b: &[u8], at: usize| {
+        Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?) as usize)
+    };
+    let u32_at = |b: &[u8], at: usize| {
+        Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    let u64_at = |b: &[u8], at: usize| {
+        Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?) as usize)
+    };
+    let (shoff, shentsize, shnum) =
+        (u64_at(&head, 0x28)?, u16_at(&head, 0x3a)?, u16_at(&head, 0x3c)?);
+    let mut table = vec![0u8; shentsize * shnum];
+    f.seek(SeekFrom::Start(shoff as u64)).ok()?;
+    f.read_exact(&mut table).ok()?;
+    let section = |i: usize| {
+        let h = i * shentsize;
+        Some((
+            u32_at(&table, h + 4)?,
+            u64_at(&table, h + 0x18)?,
+            u64_at(&table, h + 0x20)?,
+            u32_at(&table, h + 0x28)?,
+        ))
+    };
+    let mut out = BTreeSet::new();
+    let mut found = false;
+    for i in 0..shnum {
+        let (kind, offset, size, link) = section(i)?;
+        if kind != 2 {
+            continue;
+        }
+        found = true;
+        let (_, str_offset, str_size, _) = section(link)?;
+        let mut symbols = vec![0u8; size];
+        f.seek(SeekFrom::Start(offset as u64)).ok()?;
+        f.read_exact(&mut symbols).ok()?;
+        let mut strings = vec![0u8; str_size];
+        f.seek(SeekFrom::Start(str_offset as u64)).ok()?;
+        f.read_exact(&mut strings).ok()?;
+        for k in 1..size / 24 {
+            let at = k * 24;
+            let (name, shndx) = (u32_at(&symbols, at)?, u16_at(&symbols, at + 6)?);
+            if shndx == 0 || name == 0 {
+                continue;
+            }
+            let rest = strings.get(name..)?;
+            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            if rest[..end].starts_with(prefix.as_bytes()) {
+                out.insert(String::from_utf8_lossy(&rest[..end]).into_owned());
+            }
+        }
+    }
+    found.then_some(out)
+}
+
 fn elf_scan(d: &[u8]) -> Option<Scan> {
     let mut copy = d.to_vec();
-    elf_symbols(&mut copy, false)
+    elf_symbols(&mut copy, false, None)
 }
 
 /// The object itself, or `Err` when it defines a mutable static: a library linked from it would
 /// have a second copy of the variable, and code of the app can't be made to share it
-fn elf_unshare(d: &[u8]) -> Result<Vec<u8>, String> {
+fn elf_unshare(d: &[u8], known: Option<&BTreeSet<String>>) -> Result<Vec<u8>, String> {
     let mut copy = d.to_vec();
-    let scan = elf_symbols(&mut copy, true).ok_or("unreadable object")?;
+    let scan = elf_symbols(&mut copy, true, known).ok_or("unreadable object")?;
     if scan.unshareable {
         let name = scan.reasons.first().cloned().unwrap_or_default();
         return Err(format!("the crate has a private mutable static {name}"));
