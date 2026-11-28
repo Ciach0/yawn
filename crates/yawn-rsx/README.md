@@ -214,6 +214,21 @@ types:
   server runs them in order, the reads between two writes at once, and answers each by itself (one
   failing does not fail the others). A lone call is an ordinary request. Nothing in the code
   changes. A batch has at most 32 calls from the client (64 are accepted).
+- **Pipelining.** A function with the default encoding also has a `name_p` twin that returns a
+  `Pending<T>` (await it for the answer) and takes, for each argument, a value, a whole earlier
+  `&Pending`, or a piece of one with `pick`. The server runs the calls in order and puts the piece
+  of the answer where the next call needs it, so a chain costs one round trip:
+
+  ```rust
+  let user = open_account_p("ann".to_string());      // nothing sent yet
+  let label = label_p(user.pick(|a| a.id), "id-".to_string());
+  let label = label.await;                           // one request carried both calls
+  ```
+
+  `pick` takes the fields `#[derive(Bits)]` writes for a struct (`user.pick(|u| u.profile).pick(|p|
+  p.age)`), so a field that does not exist is a compile error. A piece is good for the tick it was
+  made in, and it needs the browser: while rendering on the server a piece has no value and the call
+  fails.
 - The body is async (`.await` works) and compiled for the server only. Imports it alone needs go
   inside it, or behind `#[cfg(not(target_arch = "wasm32"))]`: the rest of the file is compiled for
   the client as well.

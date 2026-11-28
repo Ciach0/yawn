@@ -153,15 +153,19 @@ fn check_serde(args: TokenStream) -> Result<(), String> {
     Ok(())
 }
 
-fn skip_visibility(t: &mut Tokens) {
+fn skip_visibility(t: &mut Tokens) -> String {
+    let mut vis = String::new();
     if t.ident().as_deref() == Some("pub") {
         t.next();
+        vis.push_str("pub");
         if let Some(TokenTree::Group(g)) = t.peek()
             && g.delimiter() == Delimiter::Parenthesis
         {
+            vis.push_str(&g.to_string());
             t.next();
         }
     }
+    vis
 }
 
 fn render(items: &[TokenTree]) -> String {
@@ -247,7 +251,7 @@ fn shape(t: &mut Tokens) -> Result<Shape, String> {
 fn expand(input: TokenStream) -> Result<String, String> {
     let mut t = tokens(input);
     let attrs = attributes(&mut t)?;
-    skip_visibility(&mut t);
+    let vis = skip_visibility(&mut t);
     let kind = t.ident().ok_or("expected a struct or an enum")?;
     t.next();
     let name = t.ident().ok_or("expected a name")?;
@@ -292,7 +296,7 @@ fn expand(input: TokenStream) -> Result<String, String> {
         _ => return Err("Bits can be derived for structs and enums".into()),
     };
     let krate = attrs.crate_path.unwrap_or_else(|| "::yawn::bits".into());
-    Ok(generate(&krate, &name, &body))
+    Ok(generate(&krate, &name, &vis, &body))
 }
 
 fn field_schema(krate: &str, own: &str, f: &Field) -> String {
@@ -325,7 +329,7 @@ fn binds(fs: &[Field], prefix: &str) -> Vec<String> {
     (0..fs.len()).map(|i| format!("{prefix}{i}")).collect()
 }
 
-fn generate(krate: &str, name: &str, body: &Body) -> String {
+fn generate(krate: &str, name: &str, vis: &str, body: &Body) -> String {
     let (schema, put, get) = match body {
         Body::Struct(s) => {
             let schema = shape_schema(krate, name, &format!("struct {name}"), s);
@@ -420,9 +424,39 @@ fn generate(krate: &str, name: &str, body: &Body) -> String {
             )
         }
     };
+    let (project, pipe) = match body {
+        Body::Struct(Shape::Named(fs) | Shape::Tuple(fs)) if !fs.is_empty() => {
+            let member = |f: &Field| {
+                if f.name.chars().all(|c| c.is_ascii_digit()) {
+                    format!("f{}", f.name)
+                } else {
+                    f.name.clone()
+                }
+            };
+            let mut arms = String::new();
+            let mut decl = String::new();
+            let mut init = String::new();
+            for (i, f) in fs.iter().enumerate() {
+                arms += &format!(
+                    "Some((&{i}, rest)) => {krate}::Bits::project(&self.{}, rest, w),",
+                    f.name
+                );
+                decl += &format!("{vis} {}: {krate}::Field<{name}, {}>,", member(f), f.ty);
+                init += &format!("{}: {krate}::Field::new(&[{i}]),", member(f));
+            }
+            let project = format!(
+                "fn project(&self, path: &[u32], w: &mut ::std::vec::Vec<u8>) -> ::core::option::Option<u64> {{ match path.split_first() {{ None => {{ {krate}::Bits::put(self, w); Some(<Self as {krate}::Bits>::SCHEMA) }} {arms} _ => None }} }}"
+            );
+            let pipe = format!(
+                "{vis} struct {name}Fields {{ {decl} }} impl {krate}::Pipe for {name} {{ type Fields = {name}Fields; fn fields() -> {name}Fields {{ {name}Fields {{ {init} }} }} }}"
+            );
+            (project, pipe)
+        }
+        _ => (String::new(), String::new()),
+    };
     format!(
         "impl {krate}::Bits for {name} {{ const SCHEMA: u64 = {schema}; \
-         fn put(&self, w: &mut ::std::vec::Vec<u8>) {{ {put} }} \
-         fn get(r: &mut {krate}::Reader) -> Self {{ {get} }} }}"
+         fn put(&self, w: &mut ::std::vec::Vec<u8>) {{ {put} }} {project} \
+         fn get(r: &mut {krate}::Reader) -> Self {{ {get} }} }} {pipe}"
     )
 }

@@ -561,3 +561,15 @@ fn server_fn_encoding_is_an_option_of_the_attribute() {
     let (d, _) = err("#[post(encoding = json, encoding = bits)] fn f() {}");
     assert!(d.message.contains("given twice"), "{}", d.message);
 }
+
+#[test]
+fn server_fn_has_a_pipelined_twin_with_the_default_encoding_only() {
+    let rust = ok(
+        "#[post]\nasync fn add(mut a: i32, b: Vec<u8>) -> Option<u8> {\n    None\n}\n#[get(encoding = json)]\nasync fn plain(a: u8) -> u8 { a }\n",
+    );
+    assert!(rust.contains("pub fn add_p(a: impl ::yawn::fns::IntoArg<i32>, b: impl ::yawn::fns::IntoArg<Vec<u8>>) -> ::yawn::fns::Pending<Option<u8>> {"), "{rust}");
+    assert!(rust.contains("let a = ::yawn::fns::IntoArg::<i32>::value(a); let b = ::yawn::fns::IntoArg::<Vec<u8>>::value(b); ::yawn::fns::pending(async move { let a = a?; let b = b?; add(a, b).await })"), "{rust}");
+    assert!(rust.contains("let mut args = ::yawn::fns::ArgBuilder::new::<(i32, Vec<u8>, )>(); ::yawn::fns::IntoArg::<i32>::part(a, &mut args); ::yawn::fns::IntoArg::<Vec<u8>>::part(b, &mut args); ::yawn::fns::pipe::<Option<u8>>(::yawn::fns::Method::Post, ::core::module_path!(), \"add\", args) }"), "{rust}");
+    assert!(!rust.contains("plain_p"), "only the default encoding can be piped\n{rust}");
+    assert!(ok("#[get]\nfn ping() {}").contains("pub fn ping_p() -> ::yawn::fns::Pending<()> {"));
+}

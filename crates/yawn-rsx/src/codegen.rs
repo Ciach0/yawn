@@ -192,6 +192,74 @@ impl Gen<'_> {
             }
         }
         w.raw("\n");
+        if f.encoding == Encoding::Bits {
+            self.pipelined(f);
+        }
+    }
+
+    /// `name_p`: the call as a [`Pending`](yawn::fns::Pending) whose arguments may be pieces of the
+    /// answers of earlier calls. In the browser it joins the batch of the tick; on the server it
+    /// runs the function where it is.
+    fn pipelined(&mut self, f: &ServerFn) {
+        let w = &mut self.w;
+        for server in [true, false] {
+            w.raw(if server {
+                "#[cfg(not(target_arch = \"wasm32\"))]\n"
+            } else {
+                "#[cfg(target_arch = \"wasm32\")]\n"
+            });
+            w.raw(&format!("pub fn {}_p(", f.name));
+            for (i, p) in f.params.iter().enumerate() {
+                if i > 0 {
+                    w.raw(", ");
+                }
+                w.raw(&format!("{}: impl ::yawn::fns::IntoArg<", p.name));
+                w.verbatim(&p.ty);
+                w.raw(">");
+            }
+            w.raw(") -> ::yawn::fns::Pending<");
+            match &f.ret {
+                Some(t) => w.verbatim(t),
+                None => w.raw("()"),
+            }
+            w.raw("> {");
+            if server {
+                for p in &f.params {
+                    w.raw(&format!(" let {} = ::yawn::fns::IntoArg::<", p.name));
+                    w.verbatim(&p.ty);
+                    w.raw(&format!(">::value({});", p.name));
+                }
+                w.raw(" ::yawn::fns::pending(async move {");
+                for p in &f.params {
+                    w.raw(&format!(" let {} = {}?;", p.name, p.name));
+                }
+                let args: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+                w.raw(&format!(" {}({}).await }}) }}", f.name, args.join(", ")));
+            } else {
+                w.raw(" let mut args = ::yawn::fns::ArgBuilder::new::<(");
+                for p in &f.params {
+                    w.verbatim(&p.ty);
+                    w.raw(", ");
+                }
+                w.raw(")>();");
+                for p in &f.params {
+                    w.raw(" ::yawn::fns::IntoArg::<");
+                    w.verbatim(&p.ty);
+                    w.raw(&format!(">::part({}, &mut args);", p.name));
+                }
+                w.raw(" ::yawn::fns::pipe::<");
+                match &f.ret {
+                    Some(t) => w.verbatim(t),
+                    None => w.raw("()"),
+                }
+                w.raw(&format!(
+                    ">(::yawn::fns::Method::{}, ::core::module_path!(), \"{}\", args) }}",
+                    f.method.variant(),
+                    f.name
+                ));
+            }
+            w.raw("\n");
+        }
     }
 
     /// `__yawn_server_fns`, which adds the file's server functions to the server's routes. The

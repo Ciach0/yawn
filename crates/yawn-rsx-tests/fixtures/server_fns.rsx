@@ -29,6 +29,22 @@ fn header_count() -> usize {
     headers.len()
 }
 
+#[derive(yawn::bits::Bits, Clone, PartialEq, Debug)]
+pub struct Account {
+    pub id: u32,
+    pub name: String,
+}
+
+#[post]
+fn open_account(name: String) -> Account {
+    Account { id: name.len() as u32, name }
+}
+
+#[get]
+fn label(id: u32, prefix: String) -> String {
+    format!("{prefix}{id}")
+}
+
 component Adder() {
     let total = signal(0);
 

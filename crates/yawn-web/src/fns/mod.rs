@@ -6,6 +6,13 @@ use std::fmt;
 
 pub mod batch;
 pub mod codec;
+mod pipe;
+
+#[cfg(target_arch = "wasm32")]
+pub use pipe::ArgBuilder;
+#[cfg(not(target_arch = "wasm32"))]
+pub use pipe::pending;
+pub use pipe::{IntoArg, Pending, Piped};
 
 #[cfg(target_arch = "wasm32")]
 mod client;
@@ -13,7 +20,7 @@ mod client;
 mod serve;
 
 #[cfg(target_arch = "wasm32")]
-pub use client::call;
+pub use client::{call, pipe};
 #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
 pub use serve::{Handler, batch_route, extract, route, with_request};
 

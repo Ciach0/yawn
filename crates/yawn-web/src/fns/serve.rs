@@ -42,10 +42,24 @@ pub async fn extract<T: FromRequestParts<()>>() -> Result<T, Error> {
 /// the tuple of its argument types
 #[doc(hidden)]
 pub trait Handler<C, Args>: Clone + Send + Sync + 'static {
-    fn run(self, body: Bytes) -> impl Future<Output = Response> + Send;
+    /// Runs the call. `wanted` are the paths into the answer that later calls of a batch take their
+    /// arguments from; the second part of the result has what each came to.
+    fn run(self, body: Bytes, wanted: Vec<Vec<u32>>) -> impl Future<Output = Answered> + Send;
 }
 
-fn answer<C: Codec<T>, T>(out: Result<T, Error>) -> Response {
+/// The answer of a call and the pieces of it that the calls after it in a batch asked for
+#[doc(hidden)]
+pub type Answered = (Response, Vec<Option<(Vec<u8>, u64)>>);
+
+fn answer<C: Codec<T>, T>(out: Result<T, Error>, wanted: &[Vec<u32>]) -> Answered {
+    let projected = match &out {
+        Ok(v) => wanted.iter().map(|path| C::project(v, path)).collect(),
+        Err(_) => wanted.iter().map(|_| None).collect(),
+    };
+    (render::<C, T>(out), projected)
+}
+
+fn render<C: Codec<T>, T>(out: Result<T, Error>) -> Response {
     match out {
         Ok(v) => match C::encode(&v) {
             Ok(bytes) => ([(header::CONTENT_TYPE, C::CONTENT_TYPE)], bytes).into_response(),
@@ -80,10 +94,11 @@ macro_rules! handlers {
             Fut: Future<Output = Result<T, Error>> + Send,
             $($t: Send,)*
         {
-            async fn run(self, body: Bytes) -> Response {
+            async fn run(self, body: Bytes, wanted: Vec<Vec<u32>>) -> Answered {
+                let nothing = || wanted.iter().map(|_| None).collect();
                 match <C as Codec<($($t,)*)>>::decode(&body) {
-                    Ok(($($a,)*)) => answer::<C, T>(self($($a),*).await),
-                    Err(e) => unreadable(e),
+                    Ok(($($a,)*)) => answer::<C, T>(self($($a),*).await, &wanted),
+                    Err(e) => (unreadable(e), nothing()),
                 }
             }
         }
@@ -99,7 +114,9 @@ handlers!(a: A, b: B, c: C2, d: D, e: E, f: G);
 handlers!(a: A, b: B, c: C2, d: D, e: E, f: G, g: H);
 handlers!(a: A, b: B, c: C2, d: D, e: E, f: G, g: H, h: I);
 
-type Run = Arc<dyn Fn(Bytes) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
+type Run = Arc<
+    dyn Fn(Bytes, Vec<Vec<u32>>) -> Pin<Box<dyn Future<Output = Answered> + Send>> + Send + Sync,
+>;
 
 struct Entry {
     method: Method,
@@ -130,7 +147,7 @@ async fn serve(
                 .into_response();
         }
         return match query.and_then(decode_args) {
-            Some(args) => run(Bytes::from(args)).await,
+            Some(args) => run(Bytes::from(args), Vec::new()).await.0,
             None => (StatusCode::BAD_REQUEST, "the call has no readable args").into_response(),
         };
     }
@@ -141,7 +158,7 @@ async fn serve(
         )
             .into_response();
     }
-    run(body).await
+    run(body, Vec::new()).await.0
 }
 
 fn has_content_type(headers: &HeaderMap, want: &str) -> bool {
@@ -164,9 +181,9 @@ where
     let content_type = <C as Codec<()>>::CONTENT_TYPE;
     let run: Run = {
         let f = f.clone();
-        Arc::new(move |body| {
+        Arc::new(move |body, wanted| {
             let f = f.clone();
-            Box::pin(async move { Handler::<C, A>::run(f, body).await })
+            Box::pin(async move { Handler::<C, A>::run(f, body, wanted).await })
         })
     };
     if let Ok(mut map) = REGISTRY.write() {
@@ -238,6 +255,50 @@ fn refused(status: StatusCode, why: &str) -> Reply {
     Reply { status: status.as_u16(), body: why.as_bytes().to_vec() }
 }
 
+/// What the call at a position answered, and the pieces of it later calls took
+struct Done {
+    reply: Reply,
+    pieces: Vec<(Vec<u32>, Option<(Vec<u8>, u64)>)>,
+}
+
+async fn finish(answered: Answered, wanted: Vec<Vec<u32>>) -> Done {
+    let (response, projected) = answered;
+    Done { reply: reply_of(response).await, pieces: wanted.into_iter().zip(projected).collect() }
+}
+
+/// The arguments of a call with the pieces of earlier answers put in the places it left open
+fn assemble(call: &batch::Call, done: &[Option<Done>]) -> Result<Vec<u8>, Reply> {
+    let mut out = Vec::with_capacity(call.args.len());
+    let mut from = 0;
+    for hole in &call.holes {
+        let Some(source) = done.get(hole.from as usize).and_then(Option::as_ref) else {
+            return Err(refused(
+                StatusCode::FAILED_DEPENDENCY,
+                "the call it depends on is not before it",
+            ));
+        };
+        if !(200..300).contains(&source.reply.status) {
+            return Err(refused(StatusCode::FAILED_DEPENDENCY, "a call it depends on failed"));
+        }
+        let piece =
+            source.pieces.iter().find(|(path, _)| *path == hole.path).and_then(|(_, p)| p.as_ref());
+        let Some((bytes, schema)) = piece else {
+            return Err(refused(StatusCode::FAILED_DEPENDENCY, "the answer has no such field"));
+        };
+        if yawn_bits::folded_schema(*schema) != hole.schema {
+            return Err(refused(StatusCode::CONFLICT, "outdated"));
+        }
+        out.extend_from_slice(&call.args[from..hole.at]);
+        out.extend_from_slice(bytes);
+        from = hole.at;
+    }
+    out.extend_from_slice(&call.args[from..]);
+    if out.len() > BODY_LIMIT {
+        return Err(refused(StatusCode::PAYLOAD_TOO_LARGE, "the arguments grew too large"));
+    }
+    Ok(out)
+}
+
 async fn batch(request: Request) -> Response {
     let (parts, body) = request.into_parts();
     if !has_content_type(&parts.headers, BATCH_CONTENT_TYPE) {
@@ -250,47 +311,75 @@ async fn batch(request: Request) -> Response {
     let Some(calls) = batch::decode_request(&body, MAX_CALLS_SERVED) else {
         return (StatusCode::BAD_REQUEST, "the batch is not readable").into_response();
     };
-    let mut replies: Vec<Option<Reply>> = (0..calls.len()).map(|_| None).collect();
-    let mut reads: Vec<(usize, tokio::task::JoinHandle<Reply>)> = Vec::new();
+    let mut wanted: Vec<Vec<Vec<u32>>> = vec![Vec::new(); calls.len()];
+    for call in &calls {
+        for hole in &call.holes {
+            let paths = &mut wanted[hole.from as usize];
+            if !paths.contains(&hole.path) {
+                paths.push(hole.path.clone());
+            }
+        }
+    }
+    let mut done: Vec<Option<Done>> = (0..calls.len()).map(|_| None).collect();
+    let mut reads: Vec<(usize, tokio::task::JoinHandle<Done>)> = Vec::new();
     for (i, call) in calls.into_iter().enumerate() {
         let Some((method, run)) = lookup(&call.url) else {
-            replies[i] = Some(refused(StatusCode::NOT_FOUND, "no such server function"));
+            done[i] = Some(failed(refused(StatusCode::NOT_FOUND, "no such server function")));
             continue;
         };
         if method != call.method {
-            replies[i] = Some(refused(StatusCode::METHOD_NOT_ALLOWED, "wrong method"));
+            done[i] = Some(failed(refused(StatusCode::METHOD_NOT_ALLOWED, "wrong method")));
             continue;
         }
         let Some(request) = request_of(&parts, &call) else {
-            replies[i] = Some(refused(StatusCode::BAD_REQUEST, "bad url"));
+            done[i] = Some(failed(refused(StatusCode::BAD_REQUEST, "bad url")));
             continue;
         };
-        let args = Bytes::from(call.args);
-        let task = async move { reply_of(with_request(request, run(args)).await).await };
+        if !call.holes.is_empty() {
+            settle(&mut done, &mut reads).await;
+        }
+        let args = match assemble(&call, &done) {
+            Ok(args) => Bytes::from(args),
+            Err(reply) => {
+                done[i] = Some(failed(reply));
+                continue;
+            }
+        };
+        let paths = std::mem::take(&mut wanted[i]);
+        let task = async move {
+            finish(with_request(request, run(args, paths.clone())).await, paths).await
+        };
         if method == Method::Get {
             reads.push((i, tokio::spawn(task)));
         } else {
-            settle(&mut replies, &mut reads).await;
-            replies[i] = Some(task.await);
+            settle(&mut done, &mut reads).await;
+            done[i] = Some(task.await);
         }
     }
-    settle(&mut replies, &mut reads).await;
-    let replies: Vec<Reply> = replies
+    settle(&mut done, &mut reads).await;
+    let replies: Vec<Reply> = done
         .into_iter()
-        .map(|r| r.unwrap_or_else(|| refused(StatusCode::INTERNAL_SERVER_ERROR, "no answer")))
+        .map(|d| {
+            d.map_or_else(|| refused(StatusCode::INTERNAL_SERVER_ERROR, "no answer"), |d| d.reply)
+        })
         .collect();
     ([(header::CONTENT_TYPE, BATCH_CONTENT_TYPE)], batch::encode_response(&replies)).into_response()
 }
 
-/// Waits for the reads started so far: a write that follows must see their effects settled
+fn failed(reply: Reply) -> Done {
+    Done { reply, pieces: Vec::new() }
+}
+
+/// Waits for the reads started so far: a write that follows must see their effects settled, and a
+/// call that takes from one of them needs its answer
 async fn settle(
-    replies: &mut [Option<Reply>],
-    reads: &mut Vec<(usize, tokio::task::JoinHandle<Reply>)>,
+    done: &mut [Option<Done>],
+    reads: &mut Vec<(usize, tokio::task::JoinHandle<Done>)>,
 ) {
     for (i, handle) in reads.drain(..) {
-        replies[i] = Some(match handle.await {
-            Ok(r) => r,
-            Err(_) => refused(StatusCode::INTERNAL_SERVER_ERROR, "the function panicked"),
+        done[i] = Some(match handle.await {
+            Ok(d) => d,
+            Err(_) => failed(refused(StatusCode::INTERNAL_SERVER_ERROR, "the function panicked")),
         });
     }
 }
@@ -314,6 +403,24 @@ mod tests {
 
     async fn fail() -> Result<u8, Error> {
         Err(Error::Status(418, "teapot".into()))
+    }
+
+    #[derive(yawn_bits::Bits, Clone, PartialEq, Debug)]
+    #[bits(crate = "yawn_bits")]
+    struct User {
+        id: u32,
+        name: String,
+    }
+
+    async fn user(id: u32) -> Result<User, Error> {
+        if id == 0 {
+            return Err(Error::Status(404, "no such user".into()));
+        }
+        Ok(User { id, name: format!("user{id}") })
+    }
+
+    async fn greet(id: u32, word: String) -> Result<String, Error> {
+        Ok(format!("{word} {id}"))
     }
 
     async fn who() -> Result<usize, Error> {
@@ -349,6 +456,8 @@ mod tests {
         let r = route::<codec::Bits, _, _>(r, "/__yawn/fn/t/ping", Method::Get, ping);
         let r = route::<codec::Bits, _, _>(r, "/__yawn/fn/t/fail", Method::Delete, fail);
         let r = route::<codec::Bits, _, _>(r, "/__yawn/fn/t/who", Method::Get, who);
+        let r = route::<codec::Bits, _, _>(r, "/__yawn/fn/t/user", Method::Get, user);
+        let r = route::<codec::Bits, _, _>(r, "/__yawn/fn/t/greet", Method::Post, greet);
         let r = route::<codec::Bits, _, _>(r, "/__yawn/fn/t/read", Method::Get, read);
         let r = route::<codec::Bits, _, _>(r, "/__yawn/fn/t/write", Method::Post, write);
         batch_route(r)
@@ -439,7 +548,7 @@ mod tests {
     }
 
     fn call(method: Method, url: &str, args: Vec<u8>) -> batch::Call {
-        batch::Call { method, url: url.into(), args, content_type: "" }
+        batch::Call { method, url: url.into(), args, holes: vec![], content_type: "" }
     }
 
     async fn batch_of(
@@ -535,6 +644,64 @@ mod tests {
             );
             assert_eq!(send(&app, "GET", BATCH_URL, &h, vec![]).await.0, 405);
             assert_eq!(send(&app, "POST", BATCH_URL, &h, good).await.0, 200);
+        });
+    }
+
+    fn greet_from(from: u32, path: &[u32], schema: u64, method: Method) -> batch::Call {
+        let mut args = yawn_bits::header::<(u32, String)>().to_vec();
+        let at = args.len();
+        yawn_bits::put_value(&"hello".to_string(), &mut args);
+        batch::Call {
+            method,
+            url: "/__yawn/fn/t/greet".into(),
+            args,
+            holes: vec![batch::Hole {
+                at,
+                from,
+                path: path.to_vec(),
+                schema: yawn_bits::folded_schema(schema),
+            }],
+            content_type: "",
+        }
+    }
+
+    #[test]
+    fn a_call_can_take_its_argument_from_an_earlier_answer() {
+        use yawn_bits::{Bits, Pipe};
+        run(async {
+            let app = app();
+            let id = User::fields().id;
+            let first = call(Method::Get, "/__yawn/fn/t/user", {
+                let mut a = yawn_bits::header::<(u32,)>().to_vec();
+                yawn_bits::put_value(&7u32, &mut a);
+                a
+            });
+            let piped = greet_from(0, id.path(), u32::SCHEMA, Method::Post);
+            let replies = batch_of(&app, &[first.clone(), piped], &[]).await;
+            assert_eq!(replies[0].status, 200);
+            assert_eq!(replies[1].status, 200, "{}", String::from_utf8_lossy(&replies[1].body));
+            assert_eq!(
+                yawn_bits::from_slice::<String>(&replies[1].body),
+                Ok("hello 7".to_string())
+            );
+
+            let wrong_type = greet_from(0, id.path(), String::SCHEMA, Method::Post);
+            assert_eq!(batch_of(&app, &[first.clone(), wrong_type], &[]).await[1].status, 409);
+            let no_field = greet_from(0, &[5], u32::SCHEMA, Method::Post);
+            assert_eq!(batch_of(&app, &[first.clone(), no_field], &[]).await[1].status, 424);
+
+            let missing = call(Method::Get, "/__yawn/fn/t/user", {
+                let mut a = yawn_bits::header::<(u32,)>().to_vec();
+                yawn_bits::put_value(&0u32, &mut a);
+                a
+            });
+            let replies = batch_of(
+                &app,
+                &[missing, greet_from(0, id.path(), u32::SCHEMA, Method::Post)],
+                &[],
+            )
+            .await;
+            assert_eq!(replies.iter().map(|r| r.status).collect::<Vec<_>>(), vec![404, 424]);
         });
     }
 }

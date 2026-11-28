@@ -242,6 +242,9 @@ impl<T: Bits> Bits for Box<T> {
     fn put(&self, w: &mut Vec<u8>) {
         (**self).put(w);
     }
+    fn project(&self, path: &[u32], w: &mut Vec<u8>) -> Option<u64> {
+        (**self).project(path, w)
+    }
     fn get(r: &mut Reader) -> Self {
         if !r.enter() {
             return Box::new(T::get(r));
@@ -397,6 +400,16 @@ macro_rules! tuples {
             };
             fn put(&self, w: &mut Vec<u8>) {
                 $(self.$i.put(w);)+
+            }
+            fn project(&self, path: &[u32], w: &mut Vec<u8>) -> Option<u64> {
+                match path.split_first() {
+                    None => {
+                        self.put(w);
+                        Some(Self::SCHEMA)
+                    }
+                    $(Some((&$i, rest)) => self.$i.project(rest, w),)+
+                    _ => None,
+                }
             }
             fn get(r: &mut Reader) -> Self {
                 ($($t::get(r),)+)

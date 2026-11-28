@@ -20,6 +20,12 @@ pub trait Codec<T> {
     fn encode(value: &T) -> Result<Vec<u8>, String>;
 
     fn decode(bytes: &[u8]) -> Result<T, DecodeError>;
+
+    /// The bytes of the field `path` of the value and the hash of its type, for a call later in a
+    /// batch that takes its argument from this answer. Only a positional encoding can.
+    fn project(_value: &T, _path: &[u32]) -> Option<(Vec<u8>, u64)> {
+        None
+    }
 }
 
 /// `#[derive(Bits)]` types (and the integers, strings, `Vec`s, `Option`s... they are made of)
@@ -37,6 +43,12 @@ impl<T: yawn_bits::Bits> Codec<T> for Bits {
             yawn_bits::Error::Schema => DecodeError::Schema,
             yawn_bits::Error::Malformed(why) => DecodeError::Malformed(why.into()),
         })
+    }
+
+    fn project(value: &T, path: &[u32]) -> Option<(Vec<u8>, u64)> {
+        let mut w = Vec::new();
+        let schema = yawn_bits::Bits::project(value, path, &mut w)?;
+        Some((w, schema))
     }
 }
 

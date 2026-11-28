@@ -249,3 +249,73 @@ fn a_recursive_type_through_a_vec_has_a_schema() {
         children: (0..3).map(|i| Dir { name: i.to_string(), children: vec![] }).collect(),
     });
 }
+
+#[derive(Bits, Clone, PartialEq, Debug)]
+#[bits(crate = "yawn_bits")]
+struct Profile {
+    age: u8,
+    name: String,
+}
+
+#[derive(Bits, Clone, PartialEq, Debug)]
+#[bits(crate = "yawn_bits")]
+struct User {
+    id: u64,
+    profile: Profile,
+    tags: Vec<String>,
+}
+
+#[derive(Bits, Clone, PartialEq, Debug)]
+#[bits(crate = "yawn_bits")]
+struct Pair(u32, String);
+
+fn user() -> User {
+    User {
+        id: 77,
+        profile: Profile { age: 30, name: "ann".into() },
+        tags: vec!["a".into(), "b".into()],
+    }
+}
+
+fn projected<T: Bits>(v: &T, path: &[u32]) -> Option<(u64, Vec<u8>)> {
+    let mut w = Vec::new();
+    v.project(path, &mut w).map(|schema| (schema, w))
+}
+
+#[test]
+fn a_field_can_be_taken_from_a_value_by_its_path() {
+    use yawn_bits::Pipe;
+    let f = User::fields();
+    assert_eq!(f.id.path(), &[0]);
+    assert_eq!(f.profile.path(), &[1]);
+    assert_eq!(f.tags.path(), &[2]);
+    assert_eq!(Pair::fields().f1.path(), &[1]);
+    let u = user();
+    let (schema, bytes) = projected(&u, f.id.path()).unwrap();
+    assert_eq!((schema, bytes), (u64::SCHEMA, to_vec(&77u64)[5..].to_vec()));
+    let (schema, bytes) = projected(&u, f.profile.path()).unwrap();
+    assert_eq!(schema, Profile::SCHEMA);
+    assert_eq!(
+        from_slice::<Profile>(&[&to_vec(&0u8)[..5], &bytes[..]].concat()),
+        Err(Error::Schema)
+    );
+    let mut message = yawn_bits::header::<Profile>().to_vec();
+    message.extend_from_slice(&bytes);
+    assert_eq!(from_slice::<Profile>(&message), Ok(u.profile.clone()));
+    let (schema, bytes) = projected(&u, &[1, 1]).unwrap();
+    assert_eq!((schema, bytes), (String::SCHEMA, to_vec(&"ann".to_string())[5..].to_vec()));
+    assert_eq!(projected(&u, &[]).map(|(s, _)| s), Some(User::SCHEMA));
+    assert_eq!(projected(&u, &[9]), None);
+    assert_eq!(projected(&u, &[0, 0]), None);
+    assert_eq!(projected(&Pair(4, "x".into()), &[1]).map(|(_, b)| b), Some(vec![1, b'x']));
+    assert_eq!(projected(&(1u8, "t".to_string()), &[1]).map(|(s, _)| s), Some(String::SCHEMA));
+}
+
+#[test]
+fn a_message_can_be_put_together_from_parts() {
+    let mut message = yawn_bits::header::<(u64, String)>().to_vec();
+    message.extend_from_slice(&to_vec(&5u64)[5..]);
+    message.extend_from_slice(&to_vec(&"hi".to_string())[5..]);
+    assert_eq!(from_slice::<(u64, String)>(&message), Ok((5, "hi".to_string())));
+    assert_eq!(message, to_vec(&(5u64, "hi".to_string())));
+}

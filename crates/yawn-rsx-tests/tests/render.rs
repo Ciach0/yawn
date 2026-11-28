@@ -373,6 +373,13 @@ fn server_fns_run_the_body_on_the_server() {
         .into_parts();
     assert_eq!(now(yawn::fns::with_request(parts, server_fns::header_count())), Ok(2));
     assert!(matches!(now(server_fns::header_count()), Err(yawn::fns::Error::Status(500, _))));
+    // the `_p` twin returns a pending call; its arguments are values (or pieces of answers, which
+    // only the browser can take)
+    assert_eq!(now(server_fns::add_p(2, 3)), Ok(5));
+    assert_eq!(now(server_fns::ping_p()), Ok(()));
+    let account = now(server_fns::open_account_p("ann".to_string()));
+    assert_eq!(account, Ok(server_fns::Account { id: 3, name: "ann".into() }));
+    assert_eq!(now(server_fns::label_p(4u32, "n".to_string())), Ok("n4".to_string()));
     // axum checks the routes as they are added: distinct paths
     let _ = server_fns::__yawn_server_fns(yawn::server::axum::Router::new());
     let app = mount(server_fns::Adder::default());

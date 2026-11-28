@@ -20,12 +20,30 @@ pub const MAX_CALLS: usize = 32;
 #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
 pub(crate) const MAX_CALLS_SERVED: usize = 64;
 
+/// The most references to earlier answers one call carries, and the deepest path in one
+pub const MAX_HOLES: usize = 8;
+pub const MAX_PATH: usize = 8;
+
+/// A place in a call's arguments that an earlier call of the batch fills in: the bytes of the
+/// field `path` of its answer go in at `at`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hole {
+    /// Where in `args`, counted in bytes
+    pub at: usize,
+    /// The earlier call of the batch, by position
+    pub from: u32,
+    pub path: Vec<u32>,
+    /// The hash of the field's type the caller expects, as a message header folds it
+    pub schema: u32,
+}
+
 /// One call: the method of the function, its URL and its arguments as its codec wrote them
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
     pub method: Method,
     pub url: String,
     pub args: Vec<u8>,
+    pub holes: Vec<Hole>,
     /// What a lone call is sent with. Not part of a batch: the server knows it from the function.
     pub content_type: &'static str,
 }
@@ -75,25 +93,55 @@ pub fn encode_request(calls: &[Call]) -> Vec<u8> {
         w.push(method_byte(c.method));
         put_bytes(&mut w, c.url.as_bytes());
         put_bytes(&mut w, &c.args);
+        put_varint(&mut w, c.holes.len() as u64);
+        for h in &c.holes {
+            put_varint(&mut w, h.at as u64);
+            put_varint(&mut w, h.from as u64);
+            put_varint(&mut w, h.schema as u64);
+            put_varint(&mut w, h.path.len() as u64);
+            for &p in &h.path {
+                put_varint(&mut w, p as u64);
+            }
+        }
     }
     w
 }
 
 pub fn decode_request(bytes: &[u8], limit: usize) -> Option<Vec<Call>> {
     let mut r = Reader::new(bytes);
-    let n = r.len(3);
+    let n = r.len(4);
     if n > limit {
         return None;
     }
     let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
+    for i in 0..n {
         let method = method_from(r.byte());
         let url = String::from_utf8(get_bytes(&mut r).to_vec()).ok();
         let args = get_bytes(&mut r).to_vec();
+        let holes_n = r.len(1);
+        if holes_n > MAX_HOLES {
+            return None;
+        }
+        let mut holes = Vec::with_capacity(holes_n);
+        for _ in 0..holes_n {
+            let at = usize::try_from(r.varint()).ok()?;
+            let from = u32::try_from(r.varint()).ok()?;
+            let schema = u32::try_from(r.varint()).ok()?;
+            let path_n = r.len(1);
+            if path_n > MAX_PATH {
+                return None;
+            }
+            let path: Vec<u32> = (0..path_n).map(|_| r.varint() as u32).collect();
+            let after = holes.last().map_or(0, |h: &Hole| h.at);
+            if r.failed() || at > args.len() || at < after || from as usize >= i {
+                return None;
+            }
+            holes.push(Hole { at, from, path, schema });
+        }
         if r.failed() {
             return None;
         }
-        out.push(Call { method: method?, url: url?, args, content_type: "" });
+        out.push(Call { method: method?, url: url?, args, holes, content_type: "" });
     }
     yawn_bits::finish(r).ok()?;
     Some(out)
@@ -184,24 +232,52 @@ impl<T> Default for Queue<T> {
 }
 
 impl<T> Queue<T> {
-    /// Adds a call; true if it is the first of this tick, so the caller schedules the flush
-    pub fn push(&mut self, call: Call) -> (Slot<T>, bool) {
+    /// Adds a call; true if it is the first of this tick, so the caller schedules the flush. The
+    /// position is what a later call's [`Hole`] names.
+    pub fn push(&mut self, call: Call) -> (Slot<T>, bool, u32) {
         let first = self.waiting.is_empty();
+        let position = self.waiting.len() as u32;
         let (filler, slot) = slot();
         self.waiting.push((call, filler));
-        (slot, first)
+        (slot, first, position)
     }
 
-    /// Everything waiting, in groups of at most [`MAX_CALLS`]
+    /// Everything waiting, in groups of at most [`MAX_CALLS`]; a call that names an earlier one
+    /// stays in its group where it can, and the positions in the holes are made relative to the
+    /// group. A hole that names a call of another group cannot be filled and is left pointing past
+    /// the batch, which the server refuses.
     pub fn drain(&mut self) -> Vec<Vec<(Call, Filler<T>)>> {
-        let mut all = std::mem::take(&mut self.waiting);
-        let mut groups = Vec::new();
-        while all.len() > MAX_CALLS {
-            let rest = all.split_off(MAX_CALLS);
-            groups.push(std::mem::replace(&mut all, rest));
+        let all = std::mem::take(&mut self.waiting);
+        let n = all.len();
+        let mut cut = vec![true; n + 1];
+        for (i, (call, _)) in all.iter().enumerate() {
+            for h in &call.holes {
+                for c in cut.iter_mut().take(i + 1).skip(h.from as usize + 1) {
+                    *c = false;
+                }
+            }
         }
-        if !all.is_empty() {
-            groups.push(all);
+        let mut groups: Vec<Vec<(Call, Filler<T>)>> = Vec::new();
+        let mut starts = vec![0usize];
+        let mut start = 0;
+        while start < n {
+            let limit = (start + MAX_CALLS).min(n);
+            let end = (start + 1..=limit).rev().find(|&k| cut[k]).unwrap_or(limit);
+            starts.push(end);
+            start = end;
+        }
+        let mut items = all.into_iter();
+        for w in starts.windows(2) {
+            let base = w[0] as u32;
+            let mut group = Vec::with_capacity(w[1] - w[0]);
+            for _ in w[0]..w[1] {
+                let (mut call, filler) = items.next().expect("every call is in a group");
+                for h in &mut call.holes {
+                    h.from = if h.from >= base { h.from - base } else { u32::MAX };
+                }
+                group.push((call, filler));
+            }
+            groups.push(group);
         }
         groups
     }
@@ -217,6 +293,7 @@ mod tests {
             method: Method::Post,
             url: format!("/__yawn/fn/f{n}"),
             args: vec![n; n as usize],
+            holes: vec![],
             content_type: "",
         }
     }
@@ -226,7 +303,13 @@ mod tests {
         let calls = vec![
             call(0),
             call(3),
-            Call { method: Method::Get, url: "/a".into(), args: vec![], content_type: "" },
+            Call {
+                method: Method::Get,
+                url: "/a".into(),
+                args: vec![],
+                holes: vec![],
+                content_type: "",
+            },
         ];
         assert_eq!(decode_request(&encode_request(&calls), 8), Some(calls));
         let replies =
@@ -284,14 +367,89 @@ mod tests {
         assert_eq!(Pin::new(&mut slot).poll(&mut cx), Poll::Ready(7));
     }
 
+    fn piped(from: u32, at: usize) -> Call {
+        Call {
+            holes: vec![Hole { at, from, path: vec![0, 2], schema: 9 }],
+            args: vec![1, 2, 3, 4],
+            ..call(1)
+        }
+    }
+
+    #[test]
+    fn holes_round_trip_and_are_checked() {
+        let calls = vec![
+            call(1),
+            piped(0, 2),
+            Call {
+                holes: vec![
+                    Hole { at: 0, from: 0, path: vec![], schema: 1 },
+                    Hole { at: 4, from: 1, path: vec![7], schema: 2 },
+                ],
+                ..piped(0, 0)
+            },
+        ];
+        assert_eq!(decode_request(&encode_request(&calls), 8), Some(calls));
+        assert_eq!(
+            decode_request(&encode_request(&[piped(0, 2)]), 8),
+            None,
+            "names a call that is not before it"
+        );
+        assert_eq!(
+            decode_request(&encode_request(&[call(1), piped(1, 2)]), 8),
+            None,
+            "names itself"
+        );
+        assert_eq!(
+            decode_request(&encode_request(&[call(1), piped(0, 5)]), 8),
+            None,
+            "past the arguments"
+        );
+        let unordered = Call {
+            holes: vec![
+                Hole { at: 3, from: 0, path: vec![], schema: 1 },
+                Hole { at: 1, from: 0, path: vec![], schema: 1 },
+            ],
+            ..piped(0, 0)
+        };
+        assert_eq!(decode_request(&encode_request(&[call(1), unordered]), 8), None);
+        let many = Call {
+            holes: (0..=MAX_HOLES)
+                .map(|_| Hole { at: 0, from: 0, path: vec![], schema: 1 })
+                .collect(),
+            ..piped(0, 0)
+        };
+        assert_eq!(decode_request(&encode_request(&[call(1), many]), 8), None);
+        let deep = Call {
+            holes: vec![Hole { at: 0, from: 0, path: vec![0; MAX_PATH + 1], schema: 1 }],
+            ..piped(0, 0)
+        };
+        assert_eq!(decode_request(&encode_request(&[call(1), deep]), 8), None);
+    }
+
+    #[test]
+    fn a_chain_stays_in_one_group_and_its_holes_become_relative() {
+        let mut q = Queue::<u8>::default();
+        for n in 0..(MAX_CALLS - 2) {
+            q.push(call(n as u8));
+        }
+        let (_, _, a) = q.push(call(200));
+        let (_, _, b) = q.push(piped(a, 0));
+        q.push(piped(b, 0));
+        q.push(call(1));
+        let groups = q.drain();
+        assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), vec![MAX_CALLS - 2, 4]);
+        assert_eq!(groups[1][1].0.holes[0].from, 0);
+        assert_eq!(groups[1][2].0.holes[0].from, 1);
+    }
+
     #[test]
     fn a_queue_groups_the_tick() {
         let mut q = Queue::<u8>::default();
-        let (_, first) = q.push(call(1));
-        let (_, second) = q.push(call(2));
+        let (_, first, _) = q.push(call(1));
+        let (_, second, _) = q.push(call(2));
         assert!(first && !second);
         assert_eq!(q.drain().len(), 1);
-        let (_, again) = q.push(call(3));
+        let (_, again, _) = q.push(call(3));
         assert!(again);
         for n in 0..(MAX_CALLS + 5) {
             q.push(call(n as u8));

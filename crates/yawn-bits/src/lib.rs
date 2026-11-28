@@ -67,6 +67,19 @@ pub trait Bits: Sized {
 
     fn put(&self, w: &mut Vec<u8>);
 
+    /// Writes the field at `path` (field numbers, outermost first) and returns the hash of its
+    /// type; `None` if the value has no such field. An empty path is the value itself. Only
+    /// structs and tuples have fields to follow: this is how a call in a pipeline takes a piece of
+    /// the answer of an earlier one.
+    fn project(&self, path: &[u32], w: &mut Vec<u8>) -> Option<u64> {
+        if path.is_empty() {
+            self.put(w);
+            Some(Self::SCHEMA)
+        } else {
+            None
+        }
+    }
+
     /// Reads a value. A failure is recorded in the reader, which from then on yields empty values
     /// (zeros, empty strings and collections) without reading more, so the caller checks once at
     /// the end.
@@ -88,6 +101,40 @@ pub trait Bits: Sized {
         out
     }
 }
+
+/// A struct's own fields, by name, as handles that name a field in the type system: what
+/// `#[derive(Bits)]` writes for a struct so that a pipeline can pick a field of an answer that has
+/// not arrived yet
+pub trait Pipe: Bits {
+    type Fields;
+
+    fn fields() -> Self::Fields;
+}
+
+/// The field `F` of a `T`, by its place in the declaration
+pub struct Field<T, F> {
+    path: &'static [u32],
+    marker: std::marker::PhantomData<fn(T) -> F>,
+}
+
+impl<T, F> Field<T, F> {
+    #[doc(hidden)]
+    pub const fn new(path: &'static [u32]) -> Self {
+        Field { path, marker: std::marker::PhantomData }
+    }
+
+    pub fn path(&self) -> &'static [u32] {
+        self.path
+    }
+}
+
+impl<T, F> Clone for Field<T, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T, F> Copy for Field<T, F> {}
 
 /// The input of a decoder
 pub struct Reader<'a> {
@@ -226,6 +273,19 @@ pub fn from_slice<T: Bits>(b: &[u8]) -> Result<T, Error> {
     let v = T::get(&mut r);
     r.done()?;
     Ok(v)
+}
+
+/// The header of a message of type `T`, for a message that is put together from parts
+#[doc(hidden)]
+pub fn header<T: Bits>() -> [u8; 5] {
+    let f = fold(T::SCHEMA);
+    [VERSION, f[0], f[1], f[2], f[3]]
+}
+
+/// The hash of a type as a message's header carries it
+#[doc(hidden)]
+pub fn folded_schema(schema: u64) -> u32 {
+    u32::from_le_bytes(fold(schema))
 }
 
 /// A value without the header, for a message that carries several (the header of the whole is
