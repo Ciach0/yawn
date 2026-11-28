@@ -559,6 +559,8 @@ pub fn start_with<C: Component + 'static>(make: impl FnMut() -> C + 'static) {
         dom::show_panic(&text);
     }));
     let host = document().get_element_by_id("app").expect("missing <div id=\"app\">");
+    #[cfg(target_arch = "wasm32")]
+    crate::ui::keep::embed();
     let make = std::rc::Rc::new(RefCell::new(make));
     let build = {
         let make = make.clone();

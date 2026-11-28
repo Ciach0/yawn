@@ -300,12 +300,8 @@ fn stash() {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn save() {
-    use crate::dom;
-    if !active() {
-        return;
-    }
-    let blob = KEEP.with(|k| {
+fn blob() -> String {
+    KEEP.with(|k| {
         let keep = k.borrow();
         keep.live
             .iter()
@@ -314,7 +310,16 @@ pub(crate) fn save() {
             })
             .collect::<Vec<_>>()
             .join(&ENTRY.to_string())
-    });
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn save() {
+    use crate::dom;
+    if !active() {
+        return;
+    }
+    let blob = blob();
     // a client that's already gone has nothing left to read: what its disposal saved stays
     if blob.is_empty() {
         return;
@@ -323,6 +328,39 @@ pub(crate) fn save() {
         dom::set_string(&win, WINDOW_KEY, &blob);
         dom::warn(&format!("yawn: kept {} signals", blob.split(ENTRY).count()));
     }
+}
+
+/// A page that asks to be embedded (a script of it sets `globalThis.__yawnEmbedState`, as the
+/// playground's template does) tells the page around it what its signals hold, as a message
+/// `{yawnState: text}`, whenever that changes. The embedding page keeps it and starts the next load
+/// of the frame with `#state=<text>` after a script put it in `globalThis.__yawnKept`. The values
+/// are those `signal` can carry (numbers, text, lists of text), and they come back for the same code
+/// only, as a hot reload does
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn embed() {
+    if crate::browser::script::value("return globalThis.__yawnEmbedState ? '1' : ''") != "1" {
+        return;
+    }
+    KEEP.with(|k| k.borrow_mut().enabled = true);
+    watch(String::new());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn watch(last: String) {
+    crate::ui::timer::after(400, move || {
+        let now = blob();
+        if !now.is_empty() && now != last {
+            let mut quoted = String::from("\"");
+            for unit in now.encode_utf16() {
+                quoted.push_str(&format!("\\u{unit:04x}"));
+            }
+            quoted.push('"');
+            crate::browser::script::run(&format!(
+                "try {{ parent.postMessage({{ yawnState: {quoted} }}, '*'); }} catch (e) {{}}"
+            ));
+        }
+        watch(now);
+    });
 }
 
 #[cfg(test)]
