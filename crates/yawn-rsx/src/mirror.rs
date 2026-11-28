@@ -94,7 +94,10 @@ pub fn begin(root: &Path, on: bool) {
         crate::hotfn::index_words(&root.join("src"));
     }
     if let Ok(mut s) = state().lock() {
-        s.insert(root.to_path_buf(), State { root: root.to_path_buf(), on, trees: BTreeMap::new() });
+        s.insert(
+            root.to_path_buf(),
+            State { root: root.to_path_buf(), on, trees: BTreeMap::new() },
+        );
     }
 }
 

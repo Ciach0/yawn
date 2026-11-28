@@ -452,12 +452,8 @@ pub fn refine(root: &Path, plan: &Plan, macros: &[Vec<String>]) -> Option<Refine
         memo[c] = Some(l);
         l
     }
-    let comp_state: Vec<u8> = comps
-        .iter()
-        .map(|comp| {
-            comp.iter().any(|&v| stateful(&nodes[v].text)) as u8
-        })
-        .collect();
+    let comp_state: Vec<u8> =
+        comps.iter().map(|comp| comp.iter().any(|&v| stateful(&nodes[v].text)) as u8).collect();
     if std::env::var_os("YAWN_SPLIT_DEBUG").is_some() {
         for (c, comp) in comps.iter().enumerate() {
             let lines: usize = comp.iter().map(|&v| nodes[v].text.lines().count()).sum();
@@ -465,9 +461,25 @@ pub fn refine(root: &Path, plan: &Plan, macros: &[Vec<String>]) -> Option<Refine
                 let files: Vec<String> = comp
                     .iter()
                     .take(6)
-                    .map(|&v| nodes[v].file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
+                    .map(|&v| {
+                        nodes[v]
+                            .file
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    })
                     .collect();
-                eprintln!("SPLIT comp level {} state {} {} nodes {} lines {:?}", { let mut m = vec![None; comps.len()]; level_of(c, &comp_deps, &mut m) }, comp_state[c], comp.len(), lines, files);
+                eprintln!(
+                    "SPLIT comp level {} state {} {} nodes {} lines {:?}",
+                    {
+                        let mut m = vec![None; comps.len()];
+                        level_of(c, &comp_deps, &mut m)
+                    },
+                    comp_state[c],
+                    comp.len(),
+                    lines,
+                    files
+                );
             }
         }
     }

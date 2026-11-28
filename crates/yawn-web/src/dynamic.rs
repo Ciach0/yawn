@@ -128,7 +128,10 @@ impl<T: 'static> DevLocal<T> {
         f(value)
     }
 
-    pub fn try_with<R>(&'static self, f: impl FnOnce(&T) -> R) -> Result<R, std::thread::AccessError> {
+    pub fn try_with<R>(
+        &'static self,
+        f: impl FnOnce(&T) -> R,
+    ) -> Result<R, std::thread::AccessError> {
         Ok(self.with(f))
     }
 }

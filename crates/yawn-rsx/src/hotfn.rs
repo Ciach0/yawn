@@ -259,11 +259,8 @@ fn wrapper(vis: &str, name: &str, shape: &Shape, tail: &str, call: &str) -> Stri
 
 fn wrapper_async(vis: &str, name: &str, shape: &Shape, tail: &str, call: &str) -> String {
     let args = shape.names.join(", ");
-    let (hr, generics, bound) = if shape.borrowed {
-        ("for<'__y> ", "<'__y>", " + '__y")
-    } else {
-        ("", "", "")
-    };
+    let (hr, generics, bound) =
+        if shape.borrowed { ("for<'__y> ", "<'__y>", " + '__y") } else { ("", "", "") };
     let boxed = format!(
         "::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = {}> + ::core::marker::Send{bound}>>",
         shape.ret
@@ -277,7 +274,12 @@ fn wrapper_async(vis: &str, name: &str, shape: &Shape, tail: &str, call: &str) -
     )
 }
 
-fn vis_start(text: &str, starts: &[usize], vis: &syn::Visibility, fn_span: proc_macro2::Span) -> Option<usize> {
+fn vis_start(
+    text: &str,
+    starts: &[usize],
+    vis: &syn::Visibility,
+    fn_span: proc_macro2::Span,
+) -> Option<usize> {
     match vis {
         syn::Visibility::Inherited => span_start(text, starts, fn_span),
         syn::Visibility::Public(t) => span_start(text, starts, t.span),
@@ -365,7 +367,8 @@ impl Statics<'_> {
         let mut out = format!("#[cfg(target_arch = \"wasm32\")] {original} ");
         for d in &decls.0 {
             let symbol = self.symbol(&d.name.to_string());
-            let attrs: String = d.attrs.iter().map(|a| format!("{} ", a.to_token_stream())).collect();
+            let attrs: String =
+                d.attrs.iter().map(|a| format!("{} ", a.to_token_stream())).collect();
             out.push_str(&format!(
                 "#[cfg(not(target_arch = \"wasm32\"))] {attrs}#[unsafe(export_name = {symbol:?})] {}static {}: ::yawn::dynamic::DevLocal<{}> = ::yawn::dynamic::DevLocal::new(|| {{ {} }}); ",
                 vis_text(&d.vis),
@@ -395,10 +398,15 @@ impl<'ast> syn::visit::Visit<'ast> for Statics<'_> {
                 || p.is_ident("unsafe")
                 || p.is_ident("thread_local")
         });
-        if !shared && let Some(at) = vis_start(self.text, self.starts, &i.vis, i.static_token.span) {
+        if !shared && let Some(at) = vis_start(self.text, self.starts, &i.vis, i.static_token.span)
+        {
             let name = i.ident.to_string();
             let symbol = self.symbol(&name);
-            self.edits.push(Edit { at, end: at, text: format!("#[unsafe(export_name = {symbol:?})] ") });
+            self.edits.push(Edit {
+                at,
+                end: at,
+                text: format!("#[unsafe(export_name = {symbol:?})] "),
+            });
         }
         syn::visit::visit_item_static(self, i);
     }
@@ -408,7 +416,8 @@ impl<'ast> syn::visit::Visit<'ast> for Statics<'_> {
 /// futures must be `Send`, as the handlers' are), not just the handlers
 /// How many files of the project's `src/` mention each word, to tell a `pub fn` only its own file knows
 /// (so a change of its signature has no caller elsewhere to break) from one other files may call
-static WORDS: std::sync::Mutex<Option<std::collections::HashMap<String, usize>>> = std::sync::Mutex::new(None);
+static WORDS: std::sync::Mutex<Option<std::collections::HashMap<String, usize>>> =
+    std::sync::Mutex::new(None);
 
 pub fn index_words(src: &Path) {
     fn walk(dir: &Path, counts: &mut std::collections::HashMap<String, usize>) {
@@ -419,8 +428,10 @@ pub fn index_words(src: &Path) {
                 walk(&p, counts);
             } else if p.extension().is_some_and(|x| x == "rs" || x == "rsx") {
                 let Ok(text) = std::fs::read_to_string(&p) else { continue };
-                let words: std::collections::HashSet<&str> =
-                    text.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
+                let words: std::collections::HashSet<&str> = text
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|w| !w.is_empty())
+                    .collect();
                 for w in words {
                     *counts.entry(w.to_string()).or_insert(0) += 1;
                 }
@@ -435,7 +446,11 @@ pub fn index_words(src: &Path) {
 }
 
 fn known_only_here(name: &str) -> bool {
-    WORDS.lock().ok().and_then(|g| g.as_ref().map(|m| m.get(name).copied() == Some(1))).unwrap_or(false)
+    WORDS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|m| m.get(name).copied() == Some(1)))
+        .unwrap_or(false)
 }
 
 pub static ASYNC_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -494,8 +509,10 @@ impl Work<'_> {
             return None;
         }
         let is_async = sig.asyncness.is_some();
-        let handler = matches!(name.as_str(), "get" | "post" | "put" | "patch" | "delete" | "head" | "options")
-            || self.async_all;
+        let handler = matches!(
+            name.as_str(),
+            "get" | "post" | "put" | "patch" | "delete" | "head" | "options"
+        ) || self.async_all;
         let shape = shape(sig, self_ty, self.handlers && handler && is_async)?;
         let starts = &self.starts;
         let text = self.text;
@@ -512,7 +529,9 @@ impl Work<'_> {
         let private = self_ty.is_none()
             && (inherited
                 || hot_pub
-                || (matches!(vis, syn::Visibility::Public(_)) && !self.handlers && known_only_here(&name)));
+                || (matches!(vis, syn::Visibility::Public(_))
+                    && !self.handlers
+                    && known_only_here(&name)));
         let sig_hash = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&(&shape.types, &shape.ret, is_async), &mut h);
@@ -525,7 +544,11 @@ impl Work<'_> {
         };
         let vis_prefix = if hot_pub {
             self.sigs.push(format!("{name}#{sig_hash}"));
-            format!("#[unsafe(export_name = \"__yawn_pub_{}_{name}_{sig_hash}\")] {}", self.unit, vis_text(vis))
+            format!(
+                "#[unsafe(export_name = \"__yawn_pub_{}_{name}_{sig_hash}\")] {}",
+                self.unit,
+                vis_text(vis)
+            )
         } else {
             vis_text(vis)
         };
@@ -598,7 +621,11 @@ fn includes_rewritten(text: &str, dir: &Path) -> Option<String> {
             return None;
         }
         out.push_str(&lead);
-        let full = if Path::new(path).is_absolute() { path.to_string() } else { dir.join(path).to_string_lossy().replace('\\', "/") };
+        let full = if Path::new(path).is_absolute() {
+            path.to_string()
+        } else {
+            dir.join(path).to_string_lossy().replace('\\', "/")
+        };
         out.push_str(&format!("{full:?}"));
         rest = after;
     }
@@ -866,9 +893,24 @@ impl fmt::Display for Entry {
         let text = "pub fn shown() -> u32 { helper(1) }\nfn helper(x: u32) -> u32 { x + 1 }\npub struct S(u32);\n";
         let last = |t: &str| t.lines().last().unwrap().to_string();
         let a = transform(text, Path::new("/p/src"), "m").unwrap();
-        let b = transform(&text.replace("x: u32) -> u32 { x + 1 }", "x: u64, y: u64) -> u32 { (x + y) as u32 }"), Path::new("/p/src"), "m").unwrap();
-        let c = transform(&text.replace("pub fn shown() -> u32", "pub fn shown() -> u64"), Path::new("/p/src"), "m").unwrap();
-        let d = transform(&text.replace("pub struct S(u32)", "pub struct S(u64)"), Path::new("/p/src"), "m").unwrap();
+        let b = transform(
+            &text.replace("x: u32) -> u32 { x + 1 }", "x: u64, y: u64) -> u32 { (x + y) as u32 }"),
+            Path::new("/p/src"),
+            "m",
+        )
+        .unwrap();
+        let c = transform(
+            &text.replace("pub fn shown() -> u32", "pub fn shown() -> u64"),
+            Path::new("/p/src"),
+            "m",
+        )
+        .unwrap();
+        let d = transform(
+            &text.replace("pub struct S(u32)", "pub struct S(u64)"),
+            Path::new("/p/src"),
+            "m",
+        )
+        .unwrap();
         assert_eq!(last(&a), last(&b));
         assert_eq!(last(&a), last(&c));
         assert_ne!(last(&a), last(&d));
@@ -881,8 +923,14 @@ impl fmt::Display for Entry {
     #[test]
     fn a_body_edit_keeps_the_skeleton_and_a_struct_edit_changes_it() {
         let a = transform(SAMPLE, Path::new("/p/src"), "m").unwrap();
-        let b = transform(&SAMPLE.replace("a + b + c", "a * b * c"), Path::new("/p/src"), "m").unwrap();
-        let c = transform(&SAMPLE.replace("pub struct Entry(u32);", "pub struct Entry(u64);"), Path::new("/p/src"), "m").unwrap();
+        let b =
+            transform(&SAMPLE.replace("a + b + c", "a * b * c"), Path::new("/p/src"), "m").unwrap();
+        let c = transform(
+            &SAMPLE.replace("pub struct Entry(u32);", "pub struct Entry(u64);"),
+            Path::new("/p/src"),
+            "m",
+        )
+        .unwrap();
         let tail = |t: &str| t.lines().last().unwrap().to_string();
         assert_ne!(a, b);
         assert_eq!(tail(&a), tail(&b));

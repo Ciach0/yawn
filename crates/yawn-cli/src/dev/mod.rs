@@ -762,9 +762,11 @@ impl Dev {
                         if overlay_wasm {
                             let mut seen = Vec::new();
                             let r = match &wasm_map {
-                                Some(map) => d.build_side_overlay(&leaves, map, &dist, &kill, &mut |p| {
-                                    seen.push(p.clone())
-                                }),
+                                Some(map) => {
+                                    d.build_side_overlay(&leaves, map, &dist, &kill, &mut |p| {
+                                        seen.push(p.clone())
+                                    })
+                                }
                                 None => Err(dynamic::SideError::Fallback(
                                     "no recorded rustc commands for the overlay".into(),
                                 )),
@@ -858,18 +860,23 @@ impl Dev {
                                     };
                                     match r {
                                         Ok(list) => {
-                                            let parts: Vec<(std::path::PathBuf, bool)> =
-                                                list.iter().map(|(_, rlib, full)| (rlib.clone(), !full)).collect();
+                                            let parts: Vec<(std::path::PathBuf, bool)> = list
+                                                .iter()
+                                                .map(|(_, rlib, full)| (rlib.clone(), !full))
+                                                .collect();
                                             let key = list
                                                 .iter()
                                                 .filter(|(_, _, full)| *full)
                                                 .filter_map(|(name, _, _)| {
-                                                    leaves.iter().find(|l| overlay::crate_name(&l.package) == *name)
+                                                    leaves.iter().find(|l| {
+                                                        overlay::crate_name(&l.package) == *name
+                                                    })
                                                 })
                                                 .map(|l| l.dir.clone())
                                                 .collect::<Vec<_>>()
                                                 .join("+");
-                                            *batch.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, parts));
+                                            *batch.lock().unwrap_or_else(|e| e.into_inner()) =
+                                                Some((key, parts));
                                             out.push((seen, Ok(std::path::PathBuf::new())));
                                         }
                                         Err(e) => out.push((seen, Err(e))),
@@ -943,16 +950,26 @@ impl Dev {
                                 if batch_done {
                                     break;
                                 }
-                                let ready = prebuilt.as_mut().filter(|p| !p.is_empty()).map(|p| p.remove(0));
+                                let ready = prebuilt
+                                    .as_mut()
+                                    .filter(|p| !p.is_empty())
+                                    .map(|p| p.remove(0));
                                 let (seen, r) = match ready {
                                     Some((seen, Ok(rlib))) => {
-                                        let taken = batch.lock().unwrap_or_else(|e| e.into_inner()).take();
+                                        let taken =
+                                            batch.lock().unwrap_or_else(|e| e.into_inner()).take();
                                         let r = match taken {
                                             Some((key, parts)) => {
                                                 batch_done = true;
-                                                d.link_native_parts(&key, &parts, &self.project.dev_dir)
+                                                d.link_native_parts(
+                                                    &key,
+                                                    &parts,
+                                                    &self.project.dev_dir,
+                                                )
                                             }
-                                            None => d.link_native(leaf, &rlib, &self.project.dev_dir),
+                                            None => {
+                                                d.link_native(leaf, &rlib, &self.project.dev_dir)
+                                            }
                                         };
                                         (seen, r)
                                     }
@@ -969,10 +986,13 @@ impl Dev {
                                             ],
                                             Some(SERVER_TARGET_DIR),
                                         );
-                                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                                        let args: Vec<&str> =
+                                            args.iter().map(String::as_str).collect();
                                         let env = self.lanes[1]
                                             .as_ref()
-                                            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).env())
+                                            .map(|l| {
+                                                l.lock().unwrap_or_else(|e| e.into_inner()).env()
+                                            })
                                             .unwrap_or_default();
                                         let mut seen = Vec::new();
                                         let r = d.build_native(
@@ -1099,7 +1119,11 @@ impl Dev {
         });
         // the browser's progress bar is over
         self.send_control(&format!("progress {} 0 0 ", self.rev));
-        if ok && !self.warmed && self.dynamic.is_some() && std::env::var_os("YAWN_NO_WARM").is_none() {
+        if ok
+            && !self.warmed
+            && self.dynamic.is_some()
+            && std::env::var_os("YAWN_NO_WARM").is_none()
+        {
             self.warmed = true;
             let leaves = self.dynamic.as_ref().map(|d| d.crates()).unwrap_or_default();
             let mut jobs: Vec<(dynamic::Leaf, replay::Recorded, bool)> = Vec::new();

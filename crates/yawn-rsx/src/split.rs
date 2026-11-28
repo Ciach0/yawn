@@ -407,7 +407,17 @@ fn find_units(client: &str, modules: &str, rsx_dir: &Path) -> Vec<(Unit, bool, u
             String::new()
         };
         let file = PathBuf::from(&path);
-        out.push((Unit { name, attrs, generated: file.starts_with(rsx_dir) && !file.starts_with(rsx_dir.join(crate::mirror::DIR)), file }, true, i));
+        out.push((
+            Unit {
+                name,
+                attrs,
+                generated: file.starts_with(rsx_dir)
+                    && !file.starts_with(rsx_dir.join(crate::mirror::DIR)),
+                file,
+            },
+            true,
+            i,
+        ));
     }
     let mlines: Vec<&str> = modules.lines().collect();
     let mut i = 0;

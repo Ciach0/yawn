@@ -87,21 +87,22 @@ pub fn collect(
 
 fn deps_of(recs: &BTreeMap<String, Recorded>, prefix: &str) -> BTreeMap<String, BTreeSet<String>> {
     recs.iter()
-        .map(|(n, r)| (n.clone(), externs(&r.argv, prefix).filter(|d| recs.contains_key(d)).collect()))
+        .map(|(n, r)| {
+            (n.clone(), externs(&r.argv, prefix).filter(|d| recs.contains_key(d)).collect())
+        })
         .collect()
 }
 
-fn level(deps: &BTreeMap<String, BTreeSet<String>>, name: &str, memo: &mut BTreeMap<String, usize>) -> usize {
+fn level(
+    deps: &BTreeMap<String, BTreeSet<String>>,
+    name: &str,
+    memo: &mut BTreeMap<String, usize>,
+) -> usize {
     if let Some(l) = memo.get(name) {
         return *l;
     }
-    let l = deps
-        .get(name)
-        .into_iter()
-        .flatten()
-        .map(|d| level(deps, d, memo) + 1)
-        .max()
-        .unwrap_or(0);
+    let l =
+        deps.get(name).into_iter().flatten().map(|d| level(deps, d, memo) + 1).max().unwrap_or(0);
     memo.insert(name.to_string(), l);
     l
 }
@@ -139,7 +140,12 @@ fn reidentify(argv: &mut [String]) {
 }
 
 /// `argv` with the metadata of the crates of the overlay in place of the files it was recorded with
-fn overlaid(mut argv: Vec<String>, overlay: &Path, sigs: &BTreeSet<String>, own: bool) -> Vec<String> {
+fn overlaid(
+    mut argv: Vec<String>,
+    overlay: &Path,
+    sigs: &BTreeSet<String>,
+    own: bool,
+) -> Vec<String> {
     if own {
         reidentify(&mut argv);
     }
@@ -244,12 +250,10 @@ pub fn run(
         let rlib = std::fs::read_dir(b.overlay.dir())
             .ok()
             .and_then(|rd| {
-                rd.flatten()
-                    .map(|e| e.path())
-                    .find(|p| {
-                        p.extension().is_some_and(|x| x == "rlib")
-                            && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&wanted))
-                    })
+                rd.flatten().map(|e| e.path()).find(|p| {
+                    p.extension().is_some_and(|x| x == "rlib")
+                        && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&wanted))
+                })
             })
             .ok_or_else(|| fallback(&format!("no library of {name}")))?;
         let is_full = full.contains(&name);

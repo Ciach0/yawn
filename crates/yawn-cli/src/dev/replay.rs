@@ -325,9 +325,12 @@ impl Lane {
     pub fn recorded(&mut self, crate_name: &str) -> Option<Recorded> {
         self.learn();
         let prefix = format!("{crate_name}-");
-        let mut found: Vec<&Cmd> = self.cmds.values().filter(|c| c.key.starts_with(&prefix)).collect();
+        let mut found: Vec<&Cmd> =
+            self.cmds.values().filter(|c| c.key.starts_with(&prefix)).collect();
         found.sort_by_key(|c| (!self.current.contains(&c.key), std::cmp::Reverse(c.seq)));
-        if std::env::var_os("YAWN_PROFILE_REC").is_some() && (crate_name.ends_with("layer1") || crate_name.ends_with("layer0_2")) {
+        if std::env::var_os("YAWN_PROFILE_REC").is_some()
+            && (crate_name.ends_with("layer1") || crate_name.ends_with("layer0_2"))
+        {
             eprintln!(
                 "REC {crate_name}: {} candidates, current {} of {}, picked current={:?}",
                 found.len(),

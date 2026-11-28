@@ -117,7 +117,11 @@ pub fn parse_json_line(line: &str) -> Option<Parsed> {
                     .flatten()
                     .filter_map(|c| c.get("message")?.as_str())
                     .flat_map(str::lines)
-                    .filter(|l| l.contains("error:") || l.contains("undefined symbol") || l.contains("duplicate symbol"))
+                    .filter(|l| {
+                        l.contains("error:")
+                            || l.contains("undefined symbol")
+                            || l.contains("duplicate symbol")
+                    })
                     .take(6)
                     .collect();
                 if !detail.is_empty() {

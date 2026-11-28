@@ -46,7 +46,8 @@ impl Drop for DevMark {
 
 /// Whether a `yawn dev` of the project is running
 pub fn dev_running(root: &Path) -> bool {
-    let Some(pid) = fs::read_to_string(root.join(DEV_PID)).ok().and_then(|t| t.trim().parse::<u32>().ok())
+    let Some(pid) =
+        fs::read_to_string(root.join(DEV_PID)).ok().and_then(|t| t.trim().parse::<u32>().ok())
     else {
         return false;
     };

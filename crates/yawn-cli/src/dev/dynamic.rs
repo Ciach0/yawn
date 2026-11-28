@@ -5,11 +5,11 @@
 use super::cargo::{self, KillGroup, Parsed};
 use super::overlay::{self, Overlay};
 use super::replay::{self, Recorded};
-use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 pub const LOADER: &str = include_str!("yawn-pic.js");
 
@@ -122,44 +122,43 @@ fn side_argv(rec: &Recorded, work: &Path, incr: &Path) -> Vec<String> {
 }
 
 fn side_argv_emit(rec: &Recorded, work: &Path, incr: &Path, emit: &str) -> Vec<String> {
-        let mut argv = Vec::new();
-        let mut i = 0;
-        while i < rec.argv.len() {
-            let a = rec.argv[i].as_str();
-            let next = rec.argv.get(i + 1).map(String::as_str).unwrap_or("");
-            if a == "--emit" || a == "--out-dir" || (a == "-C" && next.starts_with("incremental="))
-            {
-                i += 2;
-                continue;
-            }
-            if a.starts_with("--emit=") || a.starts_with("-Cincremental=") {
-                i += 1;
-                continue;
-            }
-            if a == "-C" && next.starts_with("debug-assertions=") {
-                argv.extend(["-C".into(), "debug-assertions=off".into()]);
-                i += 2;
-                continue;
-            }
-            if a == "-C" && next.starts_with("opt-level=") {
-                argv.extend(["-C".into(), "opt-level=0".into(), "-Zub-checks=no".into()]);
-                i += 2;
-                continue;
-            }
-            if a.starts_with("-Copt-level=") {
-                argv.push("-Copt-level=0".into());
-                i += 1;
-                continue;
-            }
-            argv.push(rec.argv[i].clone());
+    let mut argv = Vec::new();
+    let mut i = 0;
+    while i < rec.argv.len() {
+        let a = rec.argv[i].as_str();
+        let next = rec.argv.get(i + 1).map(String::as_str).unwrap_or("");
+        if a == "--emit" || a == "--out-dir" || (a == "-C" && next.starts_with("incremental=")) {
+            i += 2;
+            continue;
+        }
+        if a.starts_with("--emit=") || a.starts_with("-Cincremental=") {
             i += 1;
+            continue;
         }
-        argv.extend([emit.into(), "--out-dir".into(), work.to_string_lossy().into_owned()]);
-        if emit == "--emit=metadata" {
-            argv.extend(["-Z".into(), "always-encode-mir=yes".into()]);
+        if a == "-C" && next.starts_with("debug-assertions=") {
+            argv.extend(["-C".into(), "debug-assertions=off".into()]);
+            i += 2;
+            continue;
         }
-        argv.extend(["-C".into(), "relocation-model=pic".into()]);
-        argv.extend(["-C".into(), format!("incremental={}", incr.display())]);
+        if a == "-C" && next.starts_with("opt-level=") {
+            argv.extend(["-C".into(), "opt-level=0".into(), "-Zub-checks=no".into()]);
+            i += 2;
+            continue;
+        }
+        if a.starts_with("-Copt-level=") {
+            argv.push("-Copt-level=0".into());
+            i += 1;
+            continue;
+        }
+        argv.push(rec.argv[i].clone());
+        i += 1;
+    }
+    argv.extend([emit.into(), "--out-dir".into(), work.to_string_lossy().into_owned()]);
+    if emit == "--emit=metadata" {
+        argv.extend(["-Z".into(), "always-encode-mir=yes".into()]);
+    }
+    argv.extend(["-C".into(), "relocation-model=pic".into()]);
+    argv.extend(["-C".into(), format!("incremental={}", incr.display())]);
     argv
 }
 
@@ -174,8 +173,14 @@ pub fn warm(dev_dir: PathBuf, jobs: Vec<(Leaf, Recorded, bool)>) {
         std::thread::spawn(move || {
             for (leaf, rec) in jobs {
                 if native {
-                    let _ =
-                        Dynamic::native_rustc(&dev_dir, "native-tmp", &leaf, &rec, &kill, &mut |_| {});
+                    let _ = Dynamic::native_rustc(
+                        &dev_dir,
+                        "native-tmp",
+                        &leaf,
+                        &rec,
+                        &kill,
+                        &mut |_| {},
+                    );
                     continue;
                 }
                 let _turn = SIDE.lock().unwrap_or_else(|e| e.into_inner());
@@ -337,11 +342,12 @@ impl Dynamic {
     /// crates they come from, which change with the lock file and with `yawn` itself
     fn learned_stamp(&self) -> String {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(&std::fs::read(self.root.join("Cargo.lock")).unwrap_or_default(), &mut h);
-        let exe = std::env::current_exe()
-            .and_then(std::fs::metadata)
-            .and_then(|m| m.modified())
-            .ok();
+        std::hash::Hash::hash(
+            &std::fs::read(self.root.join("Cargo.lock")).unwrap_or_default(),
+            &mut h,
+        );
+        let exe =
+            std::env::current_exe().and_then(std::fs::metadata).and_then(|m| m.modified()).ok();
         std::hash::Hash::hash(&exe, &mut h);
         format!("# {:016x}", std::hash::Hasher::finish(&h))
     }
@@ -395,8 +401,7 @@ impl Dynamic {
                     text.push('\n');
                 }
             }
-            let leaf =
-                Leaf {
+            let leaf = Leaf {
                 dir: dir.clone(),
                 package: yawn_rsx::manifest::member_package(&pkg, &dir),
                 server_only: false,
@@ -669,7 +674,9 @@ impl Dynamic {
             return Ok(());
         }
         let dev_dir = self.dev_dir.clone();
-        let argv = |rec: &Recorded, out: &Path, incr: &Path, emit: &str| side_argv_emit(rec, out, incr, emit);
+        let argv = |rec: &Recorded, out: &Path, incr: &Path, emit: &str| {
+            side_argv_emit(rec, out, incr, emit)
+        };
         let t0 = std::time::Instant::now();
         let built = overlay::run(
             &overlay::Build {
@@ -677,7 +684,9 @@ impl Dynamic {
                 overlay: &self.overlay,
                 recs,
                 argv: &argv,
-                incr: &|n: &str| dev_dir.join("dyn-incr").join(n.strip_prefix(&prefix).unwrap_or(n)),
+                incr: &|n: &str| {
+                    dev_dir.join("dyn-incr").join(n.strip_prefix(&prefix).unwrap_or(n))
+                },
             },
             &names,
             kill,
@@ -689,11 +698,14 @@ impl Dynamic {
         let key = built
             .iter()
             .filter(|(_, _, full)| *full)
-            .filter_map(|(name, _, _)| leaves.iter().find(|l| overlay::crate_name(&l.package) == *name))
+            .filter_map(|(name, _, _)| {
+                leaves.iter().find(|l| overlay::crate_name(&l.package) == *name)
+            })
             .map(|l| l.dir.clone())
             .collect::<Vec<_>>()
             .join("+");
-        let parts: Vec<(PathBuf, bool)> = built.iter().map(|(_, rlib, full)| (rlib.clone(), !full)).collect();
+        let parts: Vec<(PathBuf, bool)> =
+            built.iter().map(|(_, rlib, full)| (rlib.clone(), !full)).collect();
         let work = self.dev_dir.join("dyn-tmp").join(&key);
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&work).map_err(|e| fallback(&e.to_string()))?;
@@ -714,7 +726,8 @@ impl Dynamic {
     ) -> Result<Vec<(String, PathBuf, bool)>, SideError> {
         let _turn = NATIVE.lock().unwrap_or_else(|e| e.into_inner());
         let names: Vec<String> = leaves.iter().map(|l| overlay::crate_name(&l.package)).collect();
-        let argv = |rec: &Recorded, out: &Path, incr: &Path, emit: &str| native_argv(rec, out, incr, emit);
+        let argv =
+            |rec: &Recorded, out: &Path, incr: &Path, emit: &str| native_argv(rec, out, incr, emit);
         let t0 = std::time::Instant::now();
         let built = overlay::run(
             &overlay::Build {
@@ -722,7 +735,9 @@ impl Dynamic {
                 overlay,
                 recs,
                 argv: &argv,
-                incr: &|n: &str| dev_dir.join("native-incr").join(n.strip_prefix(prefix).unwrap_or(n)),
+                incr: &|n: &str| {
+                    dev_dir.join("native-incr").join(n.strip_prefix(prefix).unwrap_or(n))
+                },
             },
             &names,
             kill,
@@ -999,9 +1014,17 @@ impl Dynamic {
             ])
             .arg(&out)
             .args(&objects)
-            .args(if lazy.is_empty() { vec![] } else { vec![std::ffi::OsString::from("--start-lib")] })
+            .args(if lazy.is_empty() {
+                vec![]
+            } else {
+                vec![std::ffi::OsString::from("--start-lib")]
+            })
             .args(&lazy)
-            .args(if lazy.is_empty() { vec![] } else { vec![std::ffi::OsString::from("--end-lib")] })
+            .args(if lazy.is_empty() {
+                vec![]
+            } else {
+                vec![std::ffi::OsString::from("--end-lib")]
+            })
             .output()
             .map_err(|e| fallback(&e.to_string()))?;
         if !status.status.success() {
@@ -1264,7 +1287,10 @@ impl Dynamic {
                     && scan.unshareable
                 {
                     if std::env::var_os("YAWN_PROFILE").is_some() {
-                        eprintln!("BLOCKED {dir} {:?}", scan.reasons.iter().take(3).collect::<Vec<_>>());
+                        eprintln!(
+                            "BLOCKED {dir} {:?}",
+                            scan.reasons.iter().take(3).collect::<Vec<_>>()
+                        );
                     }
                     self.blocked.insert(dir.to_string());
                 }
