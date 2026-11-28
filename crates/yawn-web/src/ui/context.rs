@@ -174,7 +174,7 @@ fn remember(name: &str, text: String) {
 fn cached(name: &str) -> Option<(String, i64)> {
     let now = crate::browser::platform::now_millis();
     PRELOADED.with(|p| match p.borrow().get(name) {
-        Some((Some(Some(text)), at)) if current(now - at) => Some((text.clone(), now - at)),
+        Some((Some(Some(text)), at)) => Some((text.clone(), now - at)),
         _ => None,
     })
 }
@@ -266,7 +266,12 @@ pub(crate) fn preload_url(name: &str, url: &str) {
         PRELOADED.with(|p| p.borrow().get(name).map(|(state, at)| (state.clone(), now - at)));
     match seen {
         Some((None, _)) => return,
-        Some((Some(Some(_)), age)) if current(age) => return,
+        Some((Some(Some(_)), age)) => {
+            if !current(age) {
+                refresh(name, url);
+            }
+            return;
+        }
         _ => {}
     }
     if REFRESHING.with(|r| r.borrow().contains(name)) {
@@ -364,12 +369,15 @@ where
         let _ = server;
         let boot = crate::web::boot(name);
         let kept = cached(name);
-        let booted = boot.or_else(|| kept.map(|(text, _)| text));
+        let booted = boot.or_else(|| kept.clone().map(|(text, _)| text));
         let missing = booted.is_none();
         // never carried over a rebuild (see `carry`): resources of one kind share a place in the source
         let out = signal_always(booted);
         URLS.with(|u| u.borrow_mut().insert(name.to_string(), url.to_string()));
         LIVE.with(|l| l.borrow_mut().entry(name.to_string()).or_default().push(out));
+        if kept.as_ref().is_some_and(|(_, age)| !current(*age)) {
+            refresh(name, url);
+        }
         if missing {
             let (url, name) = (url.to_string(), name.to_string());
             spawn(fetch_text(url), move |text| {
