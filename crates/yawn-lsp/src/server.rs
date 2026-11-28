@@ -231,7 +231,9 @@ fn find_projects(dir: &Path, depth: usize, out: &mut Vec<Value>) {
         // A `main.rsx` project builds from the generated manifest in `.yawn/`: compile first so
         // its crate roots exist before rust-analyzer loads it
         if dir.join("src/main.rsx").is_file() {
-            let _ = yawn_rsx::project::compile_project(dir);
+            if !yawn_rsx::project::dev_running(dir) {
+                let _ = yawn_rsx::project::compile_project(dir);
+            }
             if !dir.join(yawn_rsx::manifest::MANIFEST).is_file() {
                 let _ = yawn_rsx::manifest::write(dir, yawn_rsx::project::uses_routes(dir), &[]);
             }
@@ -781,7 +783,9 @@ impl Server {
             ("textDocument/didClose", Some(uri)) if is_rsx(&uri) => self.close(&uri),
             ("textDocument/didSave", Some(uri)) if is_rsx(&uri) => {
                 if let Some(root) = self.docs.get(&uri).and_then(|d| d.root.clone()) {
-                    let _ = project::compile_project(&root); // keeps the generated files on disk current
+                    if !project::dev_running(&root) {
+                        let _ = project::compile_project(&root); // keeps the generated files on disk current
+                    }
                 }
                 // rust-analyzer's `cargo check` runs when it is told a file was saved. The user saved the
                 // `.rsx`, so tell it the generated module was: otherwise errors from the last check stay.
@@ -815,7 +819,9 @@ impl Server {
             && self.compiled_roots.insert(root.clone())
         {
             // rust-analyzer needs the generated modules to exist on disk once.
-            let _ = project::compile_project(root);
+            if !project::dev_running(root) {
+                let _ = project::compile_project(root);
+            }
             self.index.scan(root);
         }
         if let Ok(p) = uri.to_file_path() {
