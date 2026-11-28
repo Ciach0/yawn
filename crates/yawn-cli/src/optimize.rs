@@ -86,7 +86,20 @@ fn resolve(log: &dyn Fn(&str)) -> Option<PathBuf> {
     }
 }
 
+/// `YAWN_NO_WASM_OPT=1` leaves the size pass out: for builds that are thrown away soon (the
+/// playground), where `wasm-opt` is most of the time
+fn skipped(log: &dyn Fn(&str)) -> bool {
+    let skip = std::env::var_os("YAWN_NO_WASM_OPT").is_some_and(|v| v != "0");
+    if skip {
+        log("wasm-opt skipped (YAWN_NO_WASM_OPT)");
+    }
+    skip
+}
+
 pub fn wasm_opt(wasm: &Path, log: &dyn Fn(&str)) {
+    if skipped(log) {
+        return;
+    }
     let Some(exe) = resolve(log) else { return };
     run_wasm_opt(&exe, wasm, Some(log));
 }
@@ -95,6 +108,9 @@ pub fn wasm_opt(wasm: &Path, log: &dyn Fn(&str)) {
 /// names, unused imports or unused types, which was nearly all `wasm-opt` found in them (1.8% of their
 /// brotli size for ~25 s of build), so they skip it unless YAWN_CHUNK_OPT=1
 pub fn wasm_opt_all(files: &[PathBuf], log: &dyn Fn(&str)) {
+    if skipped(log) {
+        return;
+    }
     let Some(exe) = resolve(log) else { return };
     let all = std::env::var_os("YAWN_CHUNK_OPT").is_some_and(|v| v != "0");
     let files = if all { files } else { &files[..files.len().min(1)] };
