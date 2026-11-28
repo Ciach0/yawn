@@ -43,7 +43,7 @@ component Counter() {                 // props are fields: `component Card(title
 | `if let PAT = value { } else { }` | like `if`, with the pattern's bindings in scope; rebuilt whenever `value` changes (so its type needs `Clone + PartialEq`), not only when the pattern starts or stops matching |
 | `for pat in expr key keyexpr { }` | keyed list: rows are built once per key, moved (not rebuilt) on reorder, disposed on removal |
 | `style { css }` | plain CSS in the component (after or before `view`), global, written to `/pkg/rsx.css` which the dev server links automatically |
-| `server fn name(arg: T) -> R { }` | outside components: runs on the server, the client calls it like an async function (see [Server functions](#server-functions-server-fn)) |
+| `#[post] fn name(arg: T) -> R { }` | outside components: runs on the server, the client calls it like an async function; `#[get]`, `#[put]`, `#[patch]` and `#[delete]` choose the HTTP method (see [Server functions](#server-functions)) |
 | `name: Class` (prop) | `Class` (`Prop<String>`) takes `class="x"`, `class="a {x}"` and `class={sig.into()}` (a signal or memo); read it as `{class}` in a view and the page follows the signal. `.and("b")` and `.when(|| cond, "c")` join names. `Prop<T>` is the same for any type; a `&'static str` prop takes literals only. Interpolated text props go through `Into`, `{expr}` props don't: write `.into()` |
 | `<slot />` | where a component with a `children: Children` prop places what was written between its tags. `<slot name="x" />` places the prop `x: Children`, which the caller fills with `slot="x"` on a child (`<b slot="x">`) or with the contents of `<template slot="x">`; anything without a `slot` goes to `children`. A slot is built each time it's placed, so one inside `if` follows the branch (captured Strings must be signals, as in any branch) |
 
@@ -135,14 +135,15 @@ A file with no handler, a name that isn't a valid route, and two files that make
 are errors. The endpoints are merged into the app before `server::configure`, which stays for
 middleware, state and anything else that isn't a file.
 
-## Server functions (`server fn`)
+## Server functions
 
-A `server fn` in any `.rsx` file runs on the server, and the client calls it like any other async
-function:
+A `fn` marked `#[get]`, `#[post]`, `#[put]`, `#[patch]` or `#[delete]` in any `.rsx` file runs on the
+server, and the client calls it like any other async function:
 
 ```rust
 // src/todos.rsx  ->  crate::todos::add
-server fn add(title: String) -> usize {
+#[post]
+fn add(title: String) -> usize {
     crate::server::db().insert(title)
 }
 
@@ -155,17 +156,27 @@ component NewTodo() {
 ```
 
 The compiler writes two functions with the signature `pub async fn add(title: String) ->
-Result<usize, yawn::fns::Error>`: the server's runs the body, the client's posts the arguments as
-JSON to `/__yawn/fn/todos/add` and returns the answer. Both return `Result`, so a component that calls
-one compiles for SSR too; on the server the call is a direct call and never fails. The server binary
-routes every `server fn` of the project.
+Result<usize, yawn::fns::Error>`: the server's runs the body, the client's sends the arguments to
+`/__yawn/fn/todos/add` with the method of the attribute and returns the answer. Both return
+`Result`, so a component that calls one compiles for SSR too; on the server the call is a direct
+call and never fails. The server binary routes every server function of the project. `pub` and
+`async` may stand before `fn`; the function is public either way.
+
+- `#[get]` is for reads: the arguments go in the URL as `?args=` (a JSON tuple), the answer can be
+  cached like any `GET`, and the call carries an `x-yawn-fn` header. A `GET` must not change
+  anything.
+- `#[post]`, `#[put]`, `#[patch]` and `#[delete]` send the arguments as a JSON tuple in the body.
+- `#[head]` and `#[options]` are refused: a HEAD answer has no body to return, and OPTIONS is the
+  browser's own preflight request.
 
 - Arguments are `name: Type` and, like the result, `serde` types. They come from the browser:
   validate them as you would any request.
 - The body is async (`.await` works) and compiled for the server only. Imports it alone needs go
   inside it, or behind `#[cfg(not(target_arch = "wasm32"))]`: the rest of the file is compiled for
   the client as well.
-- The server answers only `application/json` requests, which a cross-site form can't send.
+- The server answers a `#[get]` only with the `x-yawn-fn` header and the others only with
+  `application/json`; a cross-site page can send neither, so it can't call a function with the
+  user's cookies.
 
 Not supported yet: generics, argument patterns (`(a, b): (u8, u8)`), streaming, and defining one in
 a plain `.rs` file.

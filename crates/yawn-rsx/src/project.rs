@@ -130,7 +130,7 @@ fn path_mod_in(dir: &Path, line: &str) -> String {
     line.to_string()
 }
 
-/// The server binary; `fn_modules` are the modules with `server fn`s (`[]` is `main.rsx`)
+/// The server binary; `fn_modules` are the modules with server functions (`[]` is `main.rsx`)
 fn server_root(root: &Path, fn_modules: &[Vec<String>]) -> String {
     let api = if crate::api::scan(root).is_ok_and(|e| e.iter().any(|e| !e.methods.is_empty())) {
         "let app = app.merge(yawn_app::api::router());\n    "

@@ -120,14 +120,6 @@ static bool scan(TSLexer *l, Stop stop, bool css) {
           while (is_ws(l->lookahead)) adv(l);
           if ((l->lookahead >= 'A' && l->lookahead <= 'Z') || at_line_start) return marked;
         }
-        if (stop == STOP_COMPONENT && n == 6 && strcmp(id, "server") == 0) {
-          // `server fn`; what this reads of anything else stays in the token
-          while (is_ws(l->lookahead)) adv(l);
-          if (l->lookahead == 'f') {
-            adv(l);
-            if (l->lookahead == 'n') { adv(l); if (!is_id(l->lookahead)) return marked; }
-          }
-        }
         if (stop == STOP_VIEW && ((n == 4 && strcmp(id, "view") == 0) || (n == 5 && strcmp(id, "style") == 0))) {
           while (is_ws(l->lookahead)) adv(l);
           if (l->lookahead == '{') return marked;

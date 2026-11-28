@@ -20,11 +20,9 @@ pub fn parse(src: &str) -> Result<File> {
             Kind::Open(_) => depth += 1,
             Kind::Close(_) => depth = depth.saturating_sub(1),
             Kind::Ident
-                if depth == 0
-                    && (&src[i..end] == "component" && is_component_start(src, end)
-                        || &src[i..end] == "server" && server_fn_kw(src, end).is_some()) =>
+                if depth == 0 && &src[i..end] == "component" && is_component_start(src, end) =>
             {
-                // `pub component` and `pub server fn` are accepted: both are always public.
+                // `pub component` is accepted: components are always public.
                 let mut start = i;
                 let before = src[rust_from..i].trim_end();
                 if before.ends_with("pub")
@@ -36,18 +34,23 @@ pub fn parse(src: &str) -> Result<File> {
                 if start > rust_from {
                     items.push(Item::Rust(rust_from..start));
                 }
-                let next = if let Some(after_fn) = server_fn_kw(src, end) {
-                    let (f, next) = parse_server_fn(src, after_fn)?;
-                    items.push(Item::ServerFn(f));
-                    next
-                } else {
-                    let (comp, next) = parse_component(src, end)?;
-                    items.push(Item::Component(comp));
-                    next
-                };
+                let (comp, next) = parse_component(src, end)?;
+                items.push(Item::Component(comp));
                 rust_from = next;
                 i = next;
                 continue;
+            }
+            Kind::Punct if depth == 0 && &src[i..end] == "#" => {
+                if let Some((method, after_fn)) = method_attr(src, end)? {
+                    if i > rust_from {
+                        items.push(Item::Rust(rust_from..i));
+                    }
+                    let (f, next) = parse_server_fn(src, after_fn, method)?;
+                    items.push(Item::ServerFn(f));
+                    rust_from = next;
+                    i = next;
+                    continue;
+                }
             }
             _ => {}
         }
@@ -144,18 +147,46 @@ fn is_component_start(src: &str, after_kw: usize) -> bool {
         && rest.trim_start().starts_with(|c: char| c.is_uppercase())
 }
 
-/// After `server`: the end of the `fn` that makes it a server function
-fn server_fn_kw(src: &str, after_kw: usize) -> Option<usize> {
-    let at = scan::skip_trivia(src, after_kw, src.len()).ok()?;
-    if at == after_kw || at >= src.len() {
-        return None;
+/// After a `#`: when it opens `#[get]`, `#[post]`... the method and the end of the `fn` the attribute
+/// belongs to (`pub` and `async` may stand between them). Any other attribute is plain Rust.
+fn method_attr(src: &str, after_hash: usize) -> Result<Option<(Method, usize)>> {
+    if !src[after_hash..].starts_with('[') {
+        return Ok(None);
     }
-    let (kind, end) = scan::token(src, at).ok()?;
-    (kind == Kind::Ident && &src[at..end] == "fn").then_some(end)
+    let close = scan::find_close(src, after_hash, src.len())?;
+    let name = src[after_hash + 1..close].trim();
+    let attr = after_hash - 1..close + 1;
+    if matches!(name, "head" | "options") {
+        return Err(Diagnostic::new(format!("`#[{name}]` cannot make a server function"), attr)
+            .help(if name == "head" {
+                "a HEAD answer has no body to return: use `#[get]`"
+            } else {
+                "OPTIONS is the browser's own preflight request: use `#[get]` or `#[post]`"
+            }));
+    }
+    let Some(method) = Method::from_attr(name) else { return Ok(None) };
+    let mut at = close + 1;
+    loop {
+        at = scan::skip_trivia(src, at, src.len())?;
+        if at >= src.len() {
+            break;
+        }
+        let (kind, end) = scan::token(src, at)?;
+        if kind != Kind::Ident {
+            break;
+        }
+        match &src[at..end] {
+            "pub" | "async" => at = end,
+            "fn" => return Ok(Some((method, end))),
+            _ => break,
+        }
+    }
+    Err(Diagnostic::new(format!("`#[{name}]` goes before a function"), attr)
+        .help("a server function looks like `#[post] fn name(arg: Type) -> Type { body }`"))
 }
 
-fn parse_server_fn(src: &str, after_fn: usize) -> Result<(ServerFn, usize)> {
-    let shape = "a server function looks like `server fn name(arg: Type) -> Type { body }`";
+fn parse_server_fn(src: &str, after_fn: usize, method: Method) -> Result<(ServerFn, usize)> {
+    let shape = "a server function looks like `#[post] fn name(arg: Type) -> Type { body }`";
     let at = scan::skip_trivia(src, after_fn, src.len())?;
     let (kind, name_end) = if at < src.len() { scan::token(src, at)? } else { (Kind::Space, at) };
     if kind != Kind::Ident {
@@ -167,11 +198,9 @@ fn parse_server_fn(src: &str, after_fn: usize) -> Result<(ServerFn, usize)> {
     let name_span = at..name_end;
     let open = scan::skip_trivia(src, name_end, src.len())?;
     if !src[open..].starts_with('(') {
-        return Err(Diagnostic::new(
-            format!("expected `(` after `server fn {name}`"),
-            open..open + 1,
-        )
-        .help(shape));
+        return Err(
+            Diagnostic::new(format!("expected `(` after `fn {name}`"), open..open + 1).help(shape)
+        );
     }
     let close = scan::find_close(src, open, src.len())?;
     let params = parse_params(src, open + 1, close)?;
@@ -184,9 +213,11 @@ fn parse_server_fn(src: &str, after_fn: usize) -> Result<(ServerFn, usize)> {
     let mut depth = 0usize;
     let body_open = loop {
         if i >= src.len() {
-            return Err(
-                Diagnostic::new(format!("`server fn {name}` has no body"), name_span).help(shape)
-            );
+            return Err(Diagnostic::new(
+                format!("server function `{name}` has no body"),
+                name_span,
+            )
+            .help(shape));
         }
         let (kind, end) = scan::token(src, i)?;
         match kind {
@@ -218,7 +249,10 @@ fn parse_server_fn(src: &str, after_fn: usize) -> Result<(ServerFn, usize)> {
     };
     let body_close = scan::find_close(src, body_open, src.len())?;
     validate_block(src, body_open + 1..body_close)?;
-    Ok((ServerFn { name, name_span, params, ret, body: body_open..body_close + 1 }, body_close + 1))
+    Ok((
+        ServerFn { method, name, name_span, params, ret, body: body_open..body_close + 1 },
+        body_close + 1,
+    ))
 }
 
 fn parse_component(src: &str, after_kw: usize) -> Result<(Component, usize)> {

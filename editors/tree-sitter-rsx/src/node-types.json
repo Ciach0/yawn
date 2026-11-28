@@ -159,11 +159,6 @@
     }
   },
   {
-    "type": "fn_name",
-    "named": true,
-    "fields": {}
-  },
-  {
     "type": "for_node",
     "named": true,
     "fields": {},
@@ -346,11 +341,6 @@
     }
   },
   {
-    "type": "param_name",
-    "named": true,
-    "fields": {}
-  },
-  {
     "type": "params",
     "named": true,
     "fields": {},
@@ -389,46 +379,6 @@
     }
   },
   {
-    "type": "server_fn",
-    "named": true,
-    "fields": {
-      "name": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "fn_name",
-            "named": true
-          }
-        ]
-      },
-      "return_type": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "rust_head",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": true,
-      "required": true,
-      "types": [
-        {
-          "type": "params",
-          "named": true
-        },
-        {
-          "type": "rust_setup",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "source_file",
     "named": true,
     "root": true,
@@ -443,10 +393,6 @@
         },
         {
           "type": "rust_toplevel",
-          "named": true
-        },
-        {
-          "type": "server_fn",
           "named": true
         }
       ]
@@ -574,10 +520,6 @@
     "named": false
   },
   {
-    "type": "->",
-    "named": false
-  },
-  {
     "type": "/>",
     "named": false
   },
@@ -631,10 +573,6 @@
     "named": true
   },
   {
-    "type": "fn",
-    "named": false
-  },
-  {
     "type": "for",
     "named": false
   },
@@ -649,6 +587,10 @@
   {
     "type": "mut",
     "named": false
+  },
+  {
+    "type": "param_name",
+    "named": true
   },
   {
     "type": "pub",
@@ -677,10 +619,6 @@
   {
     "type": "rust_type",
     "named": true
-  },
-  {
-    "type": "server",
-    "named": false
   },
   {
     "type": "style",

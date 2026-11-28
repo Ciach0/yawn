@@ -15,9 +15,45 @@ pub enum Item {
     ServerFn(ServerFn),
 }
 
-/// `server fn name(params) -> Type { body }`: runs on the server, the client calls it over HTTP
+/// The HTTP method of a server function, from its attribute: `#[get]`, `#[post]`...
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Method {
+    /// The method an attribute name stands for
+    pub fn from_attr(name: &str) -> Option<Method> {
+        Some(match name {
+            "get" => Method::Get,
+            "post" => Method::Post,
+            "put" => Method::Put,
+            "patch" => Method::Patch,
+            "delete" => Method::Delete,
+            _ => return None,
+        })
+    }
+
+    /// The variant of `yawn::fns::Method` the generated code names
+    pub fn variant(self) -> &'static str {
+        match self {
+            Method::Get => "Get",
+            Method::Post => "Post",
+            Method::Put => "Put",
+            Method::Patch => "Patch",
+            Method::Delete => "Delete",
+        }
+    }
+}
+
+/// `#[post] fn name(params) -> Type { body }`: runs on the server, the client calls it over HTTP
 #[derive(Debug, Clone)]
 pub struct ServerFn {
+    pub method: Method,
     pub name: String,
     pub name_span: Span,
     pub params: Vec<Param>,

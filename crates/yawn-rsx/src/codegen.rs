@@ -178,7 +178,8 @@ impl Gen<'_> {
             } else {
                 let args: String = f.params.iter().map(|p| format!("{}, ", p.name)).collect();
                 w.raw(&format!(
-                    " ::yawn::fns::call(::core::module_path!(), \"{}\", &({args})).await }}",
+                    " ::yawn::fns::call(::yawn::fns::Method::{}, ::core::module_path!(), \"{}\", &({args})).await }}",
+                    f.method.variant(),
                     f.name
                 ));
             }
@@ -189,18 +190,23 @@ impl Gen<'_> {
     /// `__yawn_server_fns`, which adds the file's server functions to the server's routes. The
     /// client's call builds the same URL from the same `module_path!()`.
     fn server_routes(&mut self, file: &File) {
-        let names: Vec<&str> = file
+        let names: Vec<(&str, Method)> = file
             .items
             .iter()
-            .filter_map(|i| if let Item::ServerFn(f) = i { Some(f.name.as_str()) } else { None })
+            .filter_map(|i| {
+                if let Item::ServerFn(f) = i { Some((f.name.as_str(), f.method)) } else { None }
+            })
             .collect();
         if names.is_empty() {
             return;
         }
         let w = &mut self.w;
         w.raw("\n#[cfg(not(target_arch = \"wasm32\"))]\n#[doc(hidden)]\npub fn __yawn_server_fns(r: ::yawn::server::axum::Router) -> ::yawn::server::axum::Router {\n    r");
-        for name in names {
-            w.raw(&format!("\n        .route(&::yawn::fns::url(::core::module_path!(), \"{name}\"), ::yawn::fns::handler({name}))"));
+        for (name, method) in names {
+            w.raw(&format!(
+                "\n        .route(&::yawn::fns::url(::core::module_path!(), \"{name}\"), ::yawn::fns::handler(::yawn::fns::Method::{}, {name}))",
+                method.variant()
+            ));
         }
         w.raw("\n}");
     }

@@ -43,7 +43,7 @@ pub struct Compiled {
     pub map: SourceMap,
     /// CSS from the file's `style { }` blocks, one commented section per component
     pub css: String,
-    /// Whether the file declares `server fn`s, so that its module has `__yawn_server_fns`
+    /// Whether the file declares server functions, so that its module has `__yawn_server_fns`
     pub server_fns: bool,
 }
 
