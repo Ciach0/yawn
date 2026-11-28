@@ -1,0 +1,13 @@
+[package]
+name = "yawn-bits-derive"
+version.workspace = true
+edition.workspace = true
+description = "The derive of yawn-bits"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true

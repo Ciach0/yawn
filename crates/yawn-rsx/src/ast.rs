@@ -12,6 +12,96 @@ pub enum Item {
     /// Plain Rust (imports, helper functions, structs...), copied unchanged
     Rust(Span),
     Component(Component),
+    ServerFn(ServerFn),
+}
+
+/// The HTTP method of a server function, from its attribute: `#[get]`, `#[post]`...
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Method {
+    /// The method an attribute name stands for
+    pub fn from_attr(name: &str) -> Option<Method> {
+        Some(match name {
+            "get" => Method::Get,
+            "post" => Method::Post,
+            "put" => Method::Put,
+            "patch" => Method::Patch,
+            "delete" => Method::Delete,
+            _ => return None,
+        })
+    }
+
+    /// The variant of `yawn::fns::Method` the generated code names
+    pub fn variant(self) -> &'static str {
+        match self {
+            Method::Get => "Get",
+            Method::Post => "Post",
+            Method::Put => "Put",
+            Method::Patch => "Patch",
+            Method::Delete => "Delete",
+        }
+    }
+}
+
+/// How a server function's arguments and answer are written on the wire, from
+/// `#[post(encoding = json)]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Encoding {
+    /// `yawn::bits`: positional, small, bounded; the types derive `Bits`
+    #[default]
+    Bits,
+    /// `serde` types as JSON
+    Json,
+    /// `serde` types as postcard
+    Postcard,
+    /// `serde` types in a self-describing binary format
+    Dynamic,
+}
+
+impl Encoding {
+    pub fn from_name(name: &str) -> Option<Encoding> {
+        Some(match name {
+            "bits" => Encoding::Bits,
+            "json" => Encoding::Json,
+            "postcard" => Encoding::Postcard,
+            "dynamic" => Encoding::Dynamic,
+            _ => return None,
+        })
+    }
+
+    /// The marker type in `yawn::fns::codec` the generated code names
+    pub fn marker(self) -> &'static str {
+        match self {
+            Encoding::Bits => "Bits",
+            Encoding::Json => "Json",
+            Encoding::Postcard => "Postcard",
+            Encoding::Dynamic => "Dynamic",
+        }
+    }
+}
+
+/// `#[post] fn name(params) -> Type { body }`: runs on the server, the client calls it over HTTP
+#[derive(Debug, Clone)]
+pub struct ServerFn {
+    pub method: Method,
+    pub encoding: Encoding,
+    /// `name: Type` pairs of `#[post(name: Type)]`: taken from the request on the server, not passed by
+    /// the caller
+    pub extractors: Vec<Param>,
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Param>,
+    /// The type after `->`
+    pub ret: Option<Span>,
+    /// The body, braces included
+    pub body: Span,
 }
 
 #[derive(Debug, Clone)]

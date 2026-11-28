@@ -349,3 +349,46 @@ fn ref_follows_the_element() {
         assert_eq!(input.get(), yawn::ui::element("in"));
     });
 }
+
+#[test]
+fn server_fns_run_the_body_on_the_server() {
+    use std::task::{Context, Poll, Waker};
+    use yawn_rsx_tests::server_fns;
+    // the bodies never wait, so one poll finishes them
+    fn now<F: Future>(f: F) -> F::Output {
+        match std::pin::pin!(f).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("a server fn body without awaits is ready at once"),
+        }
+    }
+    assert_eq!(now(server_fns::add(2, 3)), Ok(5));
+    assert_eq!(now(server_fns::ping()), Ok(()));
+    assert_eq!(now(server_fns::describe(vec![], ',')), Ok(Err("no words".into())));
+    assert_eq!(now(server_fns::describe(vec!["a".into(), "b".into()], ';')), Ok(Ok("a;b;".into())));
+    let (parts, ()) = yawn::server::axum::http::Request::builder()
+        .header("a", "1")
+        .header("b", "2")
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert_eq!(now(yawn::fns::with_request(parts, server_fns::header_count())), Ok(2));
+    assert!(matches!(now(server_fns::header_count()), Err(yawn::fns::Error::Status(500, _))));
+    // the `_p` twin returns a pending call; its arguments are values (or pieces of answers, which
+    // only the browser can take)
+    assert_eq!(now(server_fns::add_p(2, 3)), Ok(5));
+    assert_eq!(now(server_fns::ping_p()), Ok(()));
+    let account = now(server_fns::open_account_p("ann".to_string()));
+    assert_eq!(account, Ok(server_fns::Account { id: 3, name: "ann".into() }));
+    assert_eq!(now(server_fns::label_p(4u32, "n".to_string())), Ok("n4".to_string()));
+    // a piece of an earlier answer works on the server as in the batch
+    let account = server_fns::open_account_p("bob".to_string());
+    let label = server_fns::label_p(account.pick(|a| a.id), "id-".to_string());
+    assert_eq!(now(label), Ok("id-3".to_string()));
+    let named = server_fns::label_p(1u32, account.pick(|a| a.name));
+    assert_eq!(now(named), Ok("bob1".to_string()));
+    assert_eq!(now(account), Ok(server_fns::Account { id: 3, name: "bob".into() }));
+    // axum checks the routes as they are added: distinct paths
+    let _ = server_fns::__yawn_server_fns(yawn::server::axum::Router::new());
+    let app = mount(server_fns::Adder::default());
+    assert_eq!(text(&app, "button"), "0");
+}

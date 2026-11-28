@@ -11,7 +11,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-yawn-web.workspace = true
+# `server`: the routes of server functions
+yawn-web = { workspace = true, features = ["server"] }
 
 [build-dependencies]
 yawn-rsx.workspace = true

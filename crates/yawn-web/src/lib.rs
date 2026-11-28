@@ -14,6 +14,7 @@
 //! WASM) is the client. `yawn dev` builds and supervises both.
 
 #![allow(clippy::type_complexity)]
+pub use yawn_bits as bits;
 pub use yawn_reactivity as reactivity;
 
 #[cfg(all(feature = "config", not(target_arch = "wasm32")))]
@@ -28,6 +29,11 @@ pub mod protocol;
 /// HTTP client, the same on the server and in the browser (feature `http`)
 #[cfg(feature = "http")]
 pub mod http;
+
+/// What server functions in `.rsx` files compile to: the client calls them over HTTP (feature
+/// `server`, on by default, or `json`)
+#[cfg(any(feature = "server", feature = "json"))]
+pub mod fns;
 
 /// Values handed down to what a component builds: [`provide`](context::provide) and
 /// [`use_context`](context::use_context)

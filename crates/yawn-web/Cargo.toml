@@ -17,10 +17,16 @@ default = ["server"]
 json = ["dep:serde", "dep:serde_json"]
 config = ["dep:serde", "dep:toml"]
 http = ["dep:serde", "dep:serde_json", "dep:form_urlencoded", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:hyper-rustls", "dep:rustls", "dep:webpki-roots", "dep:tokio"]
-server = ["config", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tokio-stream", "dep:tower-http", "dep:serde_json", "dep:libc", "dep:sha2"]
+ws = ["server", "axum/ws"]
+socket = []
+postcard = ["dep:postcard", "dep:serde"]
+dynamic = ["dep:serde", "yawn-bits/serde"]
+server = ["config", "dep:serde", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tokio-stream", "dep:tower-http", "dep:serde_json", "dep:libc", "dep:sha2"]
 
 [dependencies]
 yawn-reactivity.workspace = true
+yawn-bits.workspace = true
+postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
 serde_json = { version = "1", optional = true }
@@ -35,7 +41,7 @@ hyper-rustls = { version = "0.27", optional = true, default-features = false, fe
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = { version = "1", optional = true }
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "query"] }
-tokio = { version = "1", optional = true, features = ["rt-multi-thread", "net", "io-util", "io-std", "sync", "time", "signal"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "net", "io-util", "io-std", "sync", "time", "signal", "macros"] }
 tokio-stream = { version = "0.1", optional = true, features = ["sync", "time"] }
 sha2 = { version = "0.10", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["fs", "set-header", "compression-gzip", "compression-br"] }
@@ -45,3 +51,9 @@ libc = { version = "0.2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "=0.2.129", features = ["enable-interning"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "query", "tokio", "ws"] }
+tokio-tungstenite = "0.26"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

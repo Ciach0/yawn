@@ -1,0 +1,17 @@
+[package]
+name = "yawn-bits"
+version.workspace = true
+edition.workspace = true
+description = "Yawn's binary wire format: positional, bounded, versioned by a type hash"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+yawn-bits-derive = { path = "../yawn-bits-derive", version = "0.1.0" }
+serde = { version = "1", optional = true }
+
+[features]
+serde = ["dep:serde"]

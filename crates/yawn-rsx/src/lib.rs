@@ -43,6 +43,8 @@ pub struct Compiled {
     pub map: SourceMap,
     /// CSS from the file's `style { }` blocks, one commented section per component
     pub css: String,
+    /// Whether the file declares server functions, so that its module has `__yawn_server_fns`
+    pub server_fns: bool,
 }
 
 /// Compiles the text of one `.rsx` file
@@ -67,5 +69,6 @@ pub fn compile_with(
             css.push_str(&format!("/* {path}: {} */\n{}\n", c.name, source[span.clone()].trim()));
         }
     }
-    Ok(Compiled { rust, map, css })
+    let server_fns = file.items.iter().any(|i| matches!(i, ast::Item::ServerFn(_)));
+    Ok(Compiled { rust, map, css, server_fns })
 }

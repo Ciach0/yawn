@@ -132,14 +132,165 @@ pub fn generate(
         match item {
             Item::Rust(range) => g.w.verbatim(range),
             Item::Component(c) => g.component(c)?,
+            Item::ServerFn(f) => g.server_fn(f),
         }
     }
+    g.server_routes(file);
     g.w.raw("\n");
     let map = SourceMap { source: source_path.to_string(), lines: g.w.lines };
     Ok((g.w.text, map))
 }
 
 impl Gen<'_> {
+    /// Two functions of one signature: the server's runs the body, the client's sends the
+    /// arguments to it. Both return `Result`, so a component that calls one compiles for SSR too.
+    fn server_fn(&mut self, f: &ServerFn) {
+        let w = &mut self.w;
+        w.origin(f.name_span.start);
+        for server in [true, false] {
+            if !w.text.ends_with('\n') {
+                w.raw("\n");
+            }
+            // `Ok(body)` keeps a body that doesn't match the return type an error, `()` included
+            let attrs = if server {
+                "#[cfg(not(target_arch = \"wasm32\"))]\n#[allow(clippy::unit_arg)]"
+            } else {
+                "#[cfg(target_arch = \"wasm32\")]"
+            };
+            w.raw(&format!("{attrs}\npub async fn {}(", f.name));
+            for (i, p) in f.params.iter().enumerate() {
+                if i > 0 {
+                    w.raw(", ");
+                }
+                // the client only forwards the arguments: a `mut` would be unused there
+                w.verbatim(if server { &p.span } else { &p.decl });
+            }
+            w.raw(") -> ::core::result::Result<");
+            match &f.ret {
+                Some(t) => w.verbatim(t),
+                None => w.raw("()"),
+            }
+            w.raw(", ::yawn::fns::Error> {");
+            if server {
+                // taken from the request before the body runs: the body's own `?` is not ours
+                for e in &f.extractors {
+                    w.raw(&format!(" let {} = match ::yawn::fns::extract::<", e.name));
+                    w.verbatim(&e.ty);
+                    w.raw(">().await { ::core::result::Result::Ok(v) => v, ::core::result::Result::Err(e) => return ::core::result::Result::Err(e) };");
+                }
+                w.raw(" ::core::result::Result::Ok(async move ");
+                w.verbatim(&f.body);
+                w.raw(".await) }");
+            } else {
+                let args: String = f.params.iter().map(|p| format!("{}, ", p.name)).collect();
+                w.raw(&format!(
+                    " ::yawn::fns::call::<::yawn::fns::codec::{}, _, _>(::yawn::fns::Method::{}, ::core::module_path!(), \"{}\", &({args})).await }}",
+                    f.encoding.marker(),
+                    f.method.variant(),
+                    f.name
+                ));
+            }
+        }
+        w.raw("\n");
+        if f.encoding == Encoding::Bits {
+            self.pipelined(f);
+        }
+    }
+
+    /// `name_p`: the call as a [`Pending`](yawn::fns::Pending) whose arguments may be pieces of the
+    /// answers of earlier calls. In the browser it joins the batch of the tick; on the server it
+    /// runs the function where it is.
+    fn pipelined(&mut self, f: &ServerFn) {
+        let w = &mut self.w;
+        for server in [true, false] {
+            w.raw(if server {
+                "#[cfg(not(target_arch = \"wasm32\"))]\n"
+            } else {
+                "#[cfg(target_arch = \"wasm32\")]\n"
+            });
+            w.raw(&format!("pub fn {}_p(", f.name));
+            for (i, p) in f.params.iter().enumerate() {
+                if i > 0 {
+                    w.raw(", ");
+                }
+                w.raw(&format!("{}: impl ::yawn::fns::IntoArg<", p.name));
+                w.verbatim(&p.ty);
+                w.raw(">");
+            }
+            w.raw(") -> ::yawn::fns::Pending<");
+            match &f.ret {
+                Some(t) => w.verbatim(t),
+                None => w.raw("()"),
+            }
+            w.raw("> {");
+            if server {
+                for p in &f.params {
+                    w.raw(&format!(" let {} = ::yawn::fns::IntoArg::<", p.name));
+                    w.verbatim(&p.ty);
+                    w.raw(&format!(">::value({});", p.name));
+                }
+                w.raw(" ::yawn::fns::pending(async move {");
+                for p in &f.params {
+                    w.raw(&format!(" let {} = {}.await?;", p.name, p.name));
+                }
+                let args: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+                w.raw(&format!(" {}({}).await }}) }}", f.name, args.join(", ")));
+            } else {
+                w.raw(" let mut args = ::yawn::fns::ArgBuilder::new::<(");
+                for p in &f.params {
+                    w.verbatim(&p.ty);
+                    w.raw(", ");
+                }
+                w.raw(")>();");
+                for p in &f.params {
+                    w.raw(" ::yawn::fns::IntoArg::<");
+                    w.verbatim(&p.ty);
+                    w.raw(&format!(">::part({}, &mut args);", p.name));
+                }
+                w.raw(" ::yawn::fns::pipe::<");
+                match &f.ret {
+                    Some(t) => w.verbatim(t),
+                    None => w.raw("()"),
+                }
+                w.raw(&format!(
+                    ">(::yawn::fns::Method::{}, ::core::module_path!(), \"{}\", args) }}",
+                    f.method.variant(),
+                    f.name
+                ));
+            }
+            w.raw("\n");
+        }
+    }
+
+    /// `__yawn_server_fns`, which adds the file's server functions to the server's routes. The
+    /// client's call builds the same URL from the same `module_path!()`.
+    fn server_routes(&mut self, file: &File) {
+        let names: Vec<(&str, Method, Encoding)> = file
+            .items
+            .iter()
+            .filter_map(|i| {
+                if let Item::ServerFn(f) = i {
+                    Some((f.name.as_str(), f.method, f.encoding))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let w = &mut self.w;
+        w.raw("\n#[cfg(not(target_arch = \"wasm32\"))]\n#[doc(hidden)]\npub fn __yawn_server_fns(r: ::yawn::server::axum::Router) -> ::yawn::server::axum::Router {");
+        for (name, method, encoding) in names {
+            w.raw(&format!(
+                "\n    let r = ::yawn::fns::route::<::yawn::fns::codec::{}, _, _>(r, &::yawn::fns::url(::core::module_path!(), \"{name}\"), ::yawn::fns::Method::{}, {name});",
+                encoding.marker(),
+                method.variant()
+            ));
+        }
+        w.raw("\n    r\n}");
+    }
+
     fn fresh(&mut self, prefix: &str) -> String {
         self.counter += 1;
         format!("{prefix}{}", self.counter)

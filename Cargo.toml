@@ -17,6 +17,7 @@ categories = ["web-programming", "wasm", "gui"]
 [workspace.dependencies]
 yawn-reactivity = { path = "crates/yawn-reactivity", version = "0.1.0" }
 yawn-rsx = { path = "crates/yawn-rsx", version = "0.1.0" }
+yawn-bits = { path = "crates/yawn-bits", version = "0.1.0" }
 yawn-web = { path = "crates/yawn-web", version = "0.1.0", default-features = false }
 
 [profile.release]

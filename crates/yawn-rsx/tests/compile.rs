@@ -445,3 +445,131 @@ fn a_default_must_have_a_value() {
     let (d, _) = err("component A(x: u8 = ) { view { <b /> } }");
     assert!(d.message.contains("default needs a value"), "{}", d.message);
 }
+
+#[test]
+fn server_fn_has_a_server_and_a_client_version() {
+    let src = "use x::Y;\n/// docs\n#[post]\npub async fn add(mut a: i32, b: Vec<(u8, u8)>) -> Option<Y> {\n    a += 1;\n    None\n}\n#[get]\nfn ping() {}\n#[derive(Debug)]\nstruct S;\n";
+    let rust = ok(src);
+    assert!(rust.contains("/// docs\n#[cfg(not(target_arch = \"wasm32\"))]\n#[allow(clippy::unit_arg)]\npub async fn add(mut a: i32, b: Vec<(u8, u8)>) -> ::core::result::Result<Option<Y>, ::yawn::fns::Error> { ::core::result::Result::Ok(async move {\n    a += 1;"), "{rust}");
+    assert!(rust.contains("pub async fn add(a: i32, b: Vec<(u8, u8)>) -> ::core::result::Result<Option<Y>, ::yawn::fns::Error> { ::yawn::fns::call::<::yawn::fns::codec::Bits, _, _>(::yawn::fns::Method::Post, ::core::module_path!(), \"add\", &(a, b, )).await }"), "{rust}");
+    assert!(
+        rust.contains("pub async fn ping() -> ::core::result::Result<(), ::yawn::fns::Error>"),
+        "{rust}"
+    );
+    assert!(rust.contains("let r = ::yawn::fns::route::<::yawn::fns::codec::Bits, _, _>(r, &::yawn::fns::url(::core::module_path!(), \"ping\"), ::yawn::fns::Method::Get, ping);"), "{rust}");
+    assert!(
+        rust.contains("#[derive(Debug)]\nstruct S;"),
+        "any other attribute is plain Rust\n{rust}"
+    );
+    assert!(!rust.contains("#[post]") && !rust.contains("#[get]"), "{rust}");
+    assert!(!ok("#[put] fn x() {}").is_empty() && !ok("fn a() {}").contains("__yawn_server_fns"));
+    for (attr, method) in
+        [("get", "Get"), ("post", "Post"), ("put", "Put"), ("patch", "Patch"), ("delete", "Delete")]
+    {
+        let rust = ok(&format!("#[{attr}]\nasync fn f() {{}}"));
+        assert!(
+            rust.contains(&format!("::yawn::fns::Method::{method}, ::core::module_path!()")),
+            "{rust}"
+        );
+    }
+    let c = compile(src, "t.rsx").unwrap();
+    let body = c.rust.find("    a += 1;").unwrap();
+    let line = c.rust[..body].matches('\n').count() + 1;
+    assert_eq!(c.map.map(line as u32, 5), Some((5, 5)), "the body maps to its .rsx lines");
+}
+
+#[test]
+fn server_fn_errors() {
+    let src = "#[post] fn add(a: i32 = 1) {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("no default"), "{}", d.message);
+    assert_eq!(pointed(src, &d), "a: i32 = 1");
+    let src = "#[post] fn add(a: i32) => i32 {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("expected `->`"), "{}", d.message);
+    let src = "#[post] fn add(a: i32) -> {}";
+    let (d, _) = err(src);
+    assert_eq!((d.message.as_str(), pointed(src, &d)), ("expected a type after `->`", "->"));
+    let (d, _) = err("#[post] fn (a: i32) {}");
+    assert!(d.message.contains("name of the server function"), "{}", d.message);
+    let (d, _) = err("#[post] fn add(a: i32) -> u8");
+    assert!(d.message.contains("has no body"), "{}", d.message);
+    let src = "#[post] fn add() { let = 1; }";
+    let (d, _) = err(src);
+    assert_eq!(pointed(src, &d), "=");
+
+    let src = "#[head] fn ping() {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("cannot make a server function"), "{}", d.message);
+    assert_eq!(pointed(src, &d), "#[head]");
+    let (d, _) = err("#[options] fn ping() {}");
+    assert!(d.message.contains("`#[options]`"), "{}", d.message);
+    let src = "#[get]\nstruct S;";
+    let (d, _) = err(src);
+    assert!(d.message.contains("goes before a function"), "{}", d.message);
+    assert_eq!(pointed(src, &d), "#[get]");
+}
+
+#[test]
+fn server_fn_extractors_exist_on_the_server_only() {
+    let rust = ok(
+        "#[post(headers: axum::http::HeaderMap, who: Who)]\nasync fn add(n: u8) -> u8 {\n    n\n}\n",
+    );
+    assert!(rust.contains("pub async fn add(n: u8) -> ::core::result::Result<u8, ::yawn::fns::Error> { let headers = match ::yawn::fns::extract::<axum::http::HeaderMap>().await { ::core::result::Result::Ok(v) => v, ::core::result::Result::Err(e) => return ::core::result::Result::Err(e) }; let who = match ::yawn::fns::extract::<Who>().await {"), "{rust}");
+    assert!(rust.contains("pub async fn add(n: u8) -> ::core::result::Result<u8, ::yawn::fns::Error> { ::yawn::fns::call::<"), "{rust}");
+    let src = "#[post(a: u8 = 1)] fn f() {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("no default"), "{}", d.message);
+    let (d, _) = err("#[get(a: u8) x] fn f() {}");
+    assert!(d.message.contains("ends after the options and extractors"), "{}", d.message);
+}
+
+#[test]
+fn server_fn_encoding_is_an_option_of_the_attribute() {
+    for (name, marker) in
+        [("bits", "Bits"), ("json", "Json"), ("postcard", "Postcard"), ("dynamic", "Dynamic")]
+    {
+        let rust =
+            ok(&format!("#[post(encoding = {name})]\nasync fn f(n: u8) -> u8 {{\n    n\n}}\n"));
+        assert!(
+            rust.contains(&format!("::yawn::fns::call::<::yawn::fns::codec::{marker}, _, _>")),
+            "{rust}"
+        );
+        assert!(
+            rust.contains(&format!("::yawn::fns::route::<::yawn::fns::codec::{marker}, _, _>")),
+            "{rust}"
+        );
+    }
+    let rust =
+        ok("#[get(encoding = json, headers: axum::http::HeaderMap)]\nasync fn f() -> u8 { 1 }\n");
+    assert!(
+        rust.contains("codec::Json") && rust.contains("extract::<axum::http::HeaderMap>"),
+        "{rust}"
+    );
+    let rust = ok(
+        "#[get(headers: axum::http::HeaderMap, encoding = dynamic)]\nasync fn f() -> u8 { 1 }\n",
+    );
+    assert!(
+        rust.contains("codec::Dynamic") && rust.contains("extract::<axum::http::HeaderMap>"),
+        "{rust}"
+    );
+    let src = "#[post(encoding = xml)] fn f() {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("not an encoding"), "{}", d.message);
+    let (d, _) = err("#[post(speed = fast)] fn f() {}");
+    assert!(d.message.contains("not an option"), "{}", d.message);
+    let (d, _) = err("#[post(encoding = json, encoding = bits)] fn f() {}");
+    assert!(d.message.contains("given twice"), "{}", d.message);
+}
+
+#[test]
+fn server_fn_has_a_pipelined_twin_with_the_default_encoding_only() {
+    let rust = ok(
+        "#[post]\nasync fn add(mut a: i32, b: Vec<u8>) -> Option<u8> {\n    None\n}\n#[get(encoding = json)]\nasync fn plain(a: u8) -> u8 { a }\n",
+    );
+    assert!(rust.contains("pub fn add_p(a: impl ::yawn::fns::IntoArg<i32>, b: impl ::yawn::fns::IntoArg<Vec<u8>>) -> ::yawn::fns::Pending<Option<u8>> {"), "{rust}");
+    assert!(rust.contains("let a = ::yawn::fns::IntoArg::<i32>::value(a); let b = ::yawn::fns::IntoArg::<Vec<u8>>::value(b); ::yawn::fns::pending(async move { let a = a.await?; let b = b.await?; add(a, b).await })"), "{rust}");
+    assert!(rust.contains("let mut args = ::yawn::fns::ArgBuilder::new::<(i32, Vec<u8>, )>(); ::yawn::fns::IntoArg::<i32>::part(a, &mut args); ::yawn::fns::IntoArg::<Vec<u8>>::part(b, &mut args); ::yawn::fns::pipe::<Option<u8>>(::yawn::fns::Method::Post, ::core::module_path!(), \"add\", args) }"), "{rust}");
+    assert!(!rust.contains("plain_p"), "only the default encoding can be piped\n{rust}");
+    assert!(ok("#[get]\nfn ping() {}").contains("pub fn ping_p() -> ::yawn::fns::Pending<()> {"));
+}

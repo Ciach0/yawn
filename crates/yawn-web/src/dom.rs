@@ -607,6 +607,67 @@ pub async fn fetch_bytes(req: FetchRequest<'_>) -> Result<FetchResponse, FetchEr
     result
 }
 
+#[wasm_bindgen(inline_js = r#"
+let socket = null, opening = null, next = 1;
+const waiting = new Map();
+function drop(reason) {
+  socket = null; opening = null;
+  for (const [, w] of waiting) w(null);
+  waiting.clear();
+}
+function open() {
+  if (socket && socket.readyState === 1) return Promise.resolve(socket);
+  if (opening) return opening;
+  opening = new Promise((resolve) => {
+    let ws;
+    try { ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__yawn/ws'); } catch (_) { opening = null; resolve(null); return; }
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { socket = ws; opening = null; resolve(ws); };
+    ws.onerror = () => { if (opening) { opening = null; resolve(null); } };
+    ws.onclose = () => drop();
+    ws.onmessage = (e) => {
+      const b = new Uint8Array(e.data);
+      let id = 0, shift = 0, i = 0;
+      for (; i < b.length; i++) { id += (b[i] & 127) * 2 ** shift; shift += 7; if (!(b[i] & 128)) { i++; break; } }
+      const w = waiting.get(id);
+      if (w) { waiting.delete(id); w(b.subarray(i)); }
+    };
+  });
+  return opening;
+}
+export async function socketBatch(bytes) {
+  const ws = await open();
+  if (!ws) return null;
+  const id = next++;
+  const head = [];
+  let n = id;
+  while (n >= 128) { head.push((n % 128) | 128); n = Math.floor(n / 128); }
+  head.push(n);
+  const frame = new Uint8Array(head.length + bytes.length);
+  frame.set(head, 0); frame.set(bytes, head.length);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { waiting.delete(id); resolve(null); }, 30000);
+    waiting.set(id, (r) => { clearTimeout(timer); resolve(r); });
+    try { ws.send(frame); } catch (_) { waiting.delete(id); clearTimeout(timer); resolve(null); }
+  });
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = socketBatch)]
+    fn socket_batch_js(bytes: &Bytes) -> Promise;
+}
+
+/// Sends a batch frame over the page's one WebSocket (opened on first use) and gives the answer
+/// frame that follows the id; `None` when there is no socket (the server has none, it was closed,
+/// it timed out), so the caller may send the same batch by fetch
+pub async fn socket_batch(frame: &[u8]) -> Option<Vec<u8>> {
+    let sent = PromiseFuture::new(&socket_batch_js(&view_of(frame).slice())).await.ok()?;
+    if sent.is_null() || sent.is_undefined() {
+        return None;
+    }
+    Some(copy_of(&sent.unchecked_into::<Bytes>()))
+}
+
 #[wasm_bindgen(
     inline_js = "export function viewTransition(update) { if (document.startViewTransition) document.startViewTransition(update); else update(); }"
 )]

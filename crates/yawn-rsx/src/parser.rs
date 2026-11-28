@@ -40,6 +40,18 @@ pub fn parse(src: &str) -> Result<File> {
                 i = next;
                 continue;
             }
+            Kind::Punct if depth == 0 && &src[i..end] == "#" => {
+                if let Some((attr, after_fn)) = method_attr(src, end)? {
+                    if i > rust_from {
+                        items.push(Item::Rust(rust_from..i));
+                    }
+                    let (f, next) = parse_server_fn(src, after_fn, attr)?;
+                    items.push(Item::ServerFn(f));
+                    rust_from = next;
+                    i = next;
+                    continue;
+                }
+            }
             _ => {}
         }
         i = end;
@@ -133,6 +145,216 @@ fn is_component_start(src: &str, after_kw: usize) -> bool {
     let rest = &src[after_kw..];
     rest.starts_with(|c: char| c.is_whitespace())
         && rest.trim_start().starts_with(|c: char| c.is_uppercase())
+}
+
+/// After a `#`: when it opens `#[get]`, `#[post(headers: HeaderMap)]`... the method, the extractors
+/// in the parentheses and the end of the `fn` the attribute belongs to (`pub` and `async` may stand
+/// between them). Any other attribute is plain Rust.
+/// What the attribute of a server function says: the method, the options and the extractors
+struct FnAttr {
+    method: Method,
+    encoding: Encoding,
+    extractors: Vec<Param>,
+}
+
+fn is_option(src: &str, from: usize, to: usize) -> Result<bool> {
+    let colon = scan::find_top_level(src, from, to, |k, t, i| {
+        k == Kind::Punct
+            && t == ":"
+            && src.as_bytes().get(i + 1) != Some(&b':')
+            && (i == 0 || src.as_bytes()[i - 1] != b':')
+    })?;
+    Ok(colon.is_none())
+}
+
+fn parse_option(
+    src: &str,
+    from: usize,
+    to: usize,
+    attr: &mut FnAttr,
+    seen: &mut Vec<String>,
+) -> Result<()> {
+    let text = &src[from..to];
+    let Some((key, value)) = text.split_once('=') else {
+        return Err(Diagnostic::new("expected `name = value` or `name: Type`", from..to)
+            .help("options are `encoding = bits` and extractors are `session: Session`"));
+    };
+    let (key, value) = (key.trim(), value.trim());
+    if seen.iter().any(|k| k == key) {
+        return Err(Diagnostic::new(format!("`{key}` is given twice"), from..to));
+    }
+    seen.push(key.to_string());
+    match key {
+        "encoding" => {
+            attr.encoding = Encoding::from_name(value).ok_or_else(|| {
+                Diagnostic::new(format!("`{value}` is not an encoding"), from..to).help(
+                    "the encodings are `bits` (the default), `json`, `postcard` and `dynamic`",
+                )
+            })?;
+            Ok(())
+        }
+        _ => {
+            Err(Diagnostic::new(format!("`{key}` is not an option of a server function"), from..to)
+                .help("the options are `encoding = bits | json | postcard | dynamic`"))
+        }
+    }
+}
+
+fn method_attr(src: &str, after_hash: usize) -> Result<Option<(FnAttr, usize)>> {
+    if !src[after_hash..].starts_with('[') {
+        return Ok(None);
+    }
+    let close = scan::find_close(src, after_hash, src.len())?;
+    let inner = &src[after_hash + 1..close];
+    let paren = inner.find('(').map(|p| after_hash + 1 + p);
+    let name = inner[..paren.map_or(inner.len(), |p| p - after_hash - 1)].trim();
+    let attr_span = after_hash - 1..close + 1;
+    if matches!(name, "head" | "options") {
+        return Err(Diagnostic::new(
+            format!("`#[{name}]` cannot make a server function"),
+            attr_span,
+        )
+        .help(if name == "head" {
+            "a HEAD answer has no body to return: use `#[get]`"
+        } else {
+            "OPTIONS is the browser's own preflight request: use `#[get]` or `#[post]`"
+        }));
+    }
+    let Some(method) = Method::from_attr(name) else { return Ok(None) };
+    let mut attr = FnAttr { method, encoding: Encoding::default(), extractors: Vec::new() };
+    if let Some(open) = paren {
+        let shut = scan::find_close(src, open, close)?;
+        if !src[shut + 1..close].trim().is_empty() {
+            return Err(Diagnostic::new(
+                format!("`#[{name}(...)]` ends after the options and extractors"),
+                attr_span,
+            ));
+        }
+        let mut seen = Vec::new();
+        let mut start = open + 1;
+        loop {
+            let comma =
+                scan::find_top_level(src, start, shut, |k, t, _| k == Kind::Punct && t == ",")?;
+            let end = comma.unwrap_or(shut);
+            let piece = &src[start..end];
+            if !piece.trim().is_empty() {
+                let from = start + (piece.len() - piece.trim_start().len());
+                let to = start + piece.trim_end().len();
+                if is_option(src, from, to)? {
+                    parse_option(src, from, to, &mut attr, &mut seen)?;
+                } else {
+                    let mut one = parse_params(src, from, to)?;
+                    if let Some(p) = one.iter().find(|p| p.default.is_some()) {
+                        return Err(Diagnostic::new("an extractor has no default", p.span.clone())
+                            .help("write `name: Type`, the type of an axum extractor"));
+                    }
+                    attr.extractors.append(&mut one);
+                }
+            }
+            match comma {
+                Some(c) => start = c + 1,
+                None => break,
+            }
+        }
+    }
+    let mut at = close + 1;
+    loop {
+        at = scan::skip_trivia(src, at, src.len())?;
+        if at >= src.len() {
+            break;
+        }
+        let (kind, end) = scan::token(src, at)?;
+        if kind != Kind::Ident {
+            break;
+        }
+        match &src[at..end] {
+            "pub" | "async" => at = end,
+            "fn" => return Ok(Some((attr, end))),
+            _ => break,
+        }
+    }
+    Err(Diagnostic::new(format!("`#[{name}]` goes before a function"), attr_span)
+        .help("a server function looks like `#[post] fn name(arg: Type) -> Type { body }`"))
+}
+
+fn parse_server_fn(src: &str, after_fn: usize, attr: FnAttr) -> Result<(ServerFn, usize)> {
+    let FnAttr { method, encoding, extractors } = attr;
+    let shape = "a server function looks like `#[post] fn name(arg: Type) -> Type { body }`";
+    let at = scan::skip_trivia(src, after_fn, src.len())?;
+    let (kind, name_end) = if at < src.len() { scan::token(src, at)? } else { (Kind::Space, at) };
+    if kind != Kind::Ident {
+        return Err(
+            Diagnostic::new("expected the name of the server function", at..at + 1).help(shape)
+        );
+    }
+    let name = src[at..name_end].to_string();
+    let name_span = at..name_end;
+    let open = scan::skip_trivia(src, name_end, src.len())?;
+    if !src[open..].starts_with('(') {
+        return Err(
+            Diagnostic::new(format!("expected `(` after `fn {name}`"), open..open + 1).help(shape)
+        );
+    }
+    let close = scan::find_close(src, open, src.len())?;
+    let params = parse_params(src, open + 1, close)?;
+    if let Some(p) = params.iter().find(|p| p.default.is_some()) {
+        return Err(Diagnostic::new("a server function argument has no default", p.span.clone())
+            .help("the caller passes every argument: write `name: Type`"));
+    }
+    // the body is the first `{` outside brackets: a type has none
+    let mut i = close + 1;
+    let mut depth = 0usize;
+    let body_open = loop {
+        if i >= src.len() {
+            return Err(Diagnostic::new(
+                format!("server function `{name}` has no body"),
+                name_span,
+            )
+            .help(shape));
+        }
+        let (kind, end) = scan::token(src, i)?;
+        match kind {
+            Kind::Open(b'{') if depth == 0 => break i,
+            Kind::Open(_) => depth += 1,
+            Kind::Close(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i = end;
+    };
+    let between = scan::skip_trivia(src, close + 1, body_open)?;
+    let ret = if between == body_open {
+        None
+    } else if let Some(rest) = src[between..body_open].strip_prefix("->") {
+        let from = between + 2 + (rest.len() - rest.trim_start().len());
+        let ty = from..between + 2 + rest.trim_end().len();
+        if ty.is_empty() {
+            return Err(
+                Diagnostic::new("expected a type after `->`", between..between + 2).help(shape)
+            );
+        }
+        if let Err(e) = syn::parse_str::<syn::Type>(&src[ty.clone()]) {
+            return Err(map_wrapped(&e, &src[ty.clone()], 0, ty.start, &src[ty.clone()]));
+        }
+        Some(ty)
+    } else {
+        return Err(Diagnostic::new("expected `->` and a type, or the body", between..body_open)
+            .help(shape));
+    };
+    let body_close = scan::find_close(src, body_open, src.len())?;
+    validate_block(src, body_open + 1..body_close)?;
+    Ok((
+        ServerFn {
+            method,
+            encoding,
+            extractors,
+            name,
+            name_span,
+            params,
+            ret,
+            body: body_open..body_close + 1,
+        },
+        body_close + 1,
+    ))
 }
 
 fn parse_component(src: &str, after_kw: usize) -> Result<(Component, usize)> {
