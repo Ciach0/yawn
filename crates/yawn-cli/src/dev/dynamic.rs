@@ -3,7 +3,9 @@
 //! `yawn::dynamic`) instead of rebuilding and re-linking the app. The app itself is built as usual.
 
 use super::cargo::{self, KillGroup, Parsed};
+use super::overlay::{self, Overlay};
 use super::replay::{self, Recorded};
+use std::sync::Arc;
 use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -62,6 +64,11 @@ pub fn available() -> Result<(), String> {
 pub struct Leaf {
     pub dir: String,
     pub package: String,
+    /// Everything that changed in it is for the server alone, so the browser's module needs no
+    /// rebuild
+    pub server_only: bool,
+    /// A public function of it has a new signature
+    pub sig: bool,
 }
 
 pub enum Plan {
@@ -93,6 +100,164 @@ pub struct Dynamic {
     version: u64,
     lld: Option<PathBuf>,
     native: Vec<(String, PathBuf)>,
+    learned: BTreeSet<String>,
+    failures: Option<BTreeSet<String>>,
+    sigs: Sigs,
+    items: Items,
+    pub overlay: Arc<Overlay>,
+    pub native_overlay: Arc<Overlay>,
+    side_exports: BTreeSet<String>,
+}
+
+type Sigs = BTreeMap<PathBuf, BTreeMap<String, String>>;
+type Items = BTreeMap<PathBuf, Vec<String>>;
+
+static SIDE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static NATIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The command that builds a crate as a side module: as cargo ran it, but position independent,
+/// without optimization, linking into `work` and keeping its incremental state in `incr`
+fn side_argv(rec: &Recorded, work: &Path, incr: &Path) -> Vec<String> {
+    side_argv_emit(rec, work, incr, "--emit=link")
+}
+
+fn side_argv_emit(rec: &Recorded, work: &Path, incr: &Path, emit: &str) -> Vec<String> {
+        let mut argv = Vec::new();
+        let mut i = 0;
+        while i < rec.argv.len() {
+            let a = rec.argv[i].as_str();
+            let next = rec.argv.get(i + 1).map(String::as_str).unwrap_or("");
+            if a == "--emit" || a == "--out-dir" || (a == "-C" && next.starts_with("incremental="))
+            {
+                i += 2;
+                continue;
+            }
+            if a.starts_with("--emit=") || a.starts_with("-Cincremental=") {
+                i += 1;
+                continue;
+            }
+            if a == "-C" && next.starts_with("debug-assertions=") {
+                argv.extend(["-C".into(), "debug-assertions=off".into()]);
+                i += 2;
+                continue;
+            }
+            if a == "-C" && next.starts_with("opt-level=") {
+                argv.extend(["-C".into(), "opt-level=0".into(), "-Zub-checks=no".into()]);
+                i += 2;
+                continue;
+            }
+            if a.starts_with("-Copt-level=") {
+                argv.push("-Copt-level=0".into());
+                i += 1;
+                continue;
+            }
+            argv.push(rec.argv[i].clone());
+            i += 1;
+        }
+        argv.extend([emit.into(), "--out-dir".into(), work.to_string_lossy().into_owned()]);
+        if emit == "--emit=metadata" {
+            argv.extend(["-Z".into(), "always-encode-mir=yes".into()]);
+        }
+        argv.extend(["-C".into(), "relocation-model=pic".into()]);
+        argv.extend(["-C".into(), format!("incremental={}", incr.display())]);
+    argv
+}
+
+/// Compiles the crates once in the background, as side modules would be, so that the first edit
+/// of each finds its incremental state warm. Nothing it builds is used
+pub fn warm(dev_dir: PathBuf, jobs: Vec<(Leaf, Recorded, bool)>) {
+    let kill = std::sync::Arc::new(KillGroup::default());
+    for native in [false, true] {
+        let jobs: Vec<(Leaf, Recorded)> =
+            jobs.iter().filter(|j| j.2 == native).map(|j| (j.0.clone(), j.1.clone())).collect();
+        let (kill, dev_dir) = (kill.clone(), dev_dir.clone());
+        std::thread::spawn(move || {
+            for (leaf, rec) in jobs {
+                if native {
+                    let _ =
+                        Dynamic::native_rustc(&dev_dir, "native-tmp", &leaf, &rec, &kill, &mut |_| {});
+                    continue;
+                }
+                let _turn = SIDE.lock().unwrap_or_else(|e| e.into_inner());
+                let work = dev_dir.join("dyn-tmp").join(&leaf.dir);
+                let incr = dev_dir.join("dyn-incr").join(&leaf.dir);
+                let _ = std::fs::remove_dir_all(&work);
+                if std::fs::create_dir_all(&work).is_err() {
+                    continue;
+                }
+                let argv = side_argv(&rec, &work, &incr);
+                let _ = replay::run_recorded(&argv, &rec.env, &rec.cwd, &kill, &mut |_| {});
+                let _ = std::fs::remove_dir_all(&work);
+            }
+        });
+    }
+}
+
+/// Whether `name` is a word of `text`
+fn mentions(text: &str, name: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(name).any(|(i, _)| {
+        !text[..i].chars().next_back().is_some_and(word)
+            && !text[i + name.len()..].chars().next().is_some_and(word)
+    })
+}
+
+/// Whether `name` is called in `text`: a word followed by an opening parenthesis
+fn calls(text: &str, name: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(name).any(|(i, _)| {
+        !text[..i].chars().next_back().is_some_and(word)
+            && text[i + name.len()..].trim_start().starts_with('(')
+    })
+}
+
+/// Whether every item of `before` is still in `after`, as it was, and `after` has more: the file
+/// only gained items
+fn only_added(before: Option<&Vec<String>>, after: Option<&Vec<String>>) -> bool {
+    let (Some(before), Some(after)) = (before, after) else { return false };
+    if after.len() <= before.len() {
+        return false;
+    }
+    let mut left = after.clone();
+    for b in before {
+        match left.iter().position(|a| a == b) {
+            Some(i) => {
+                left.swap_remove(i);
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
+fn native_argv(rec: &Recorded, out: &Path, incr: &Path, emit: &str) -> Vec<String> {
+    let mut argv = Vec::new();
+    let mut i = 0;
+    while i < rec.argv.len() {
+        let a = rec.argv[i].as_str();
+        let next = rec.argv.get(i + 1).map(String::as_str).unwrap_or("");
+        if a == "--emit" || a == "--out-dir" || (a == "-C" && next.starts_with("incremental=")) {
+            i += 2;
+            continue;
+        }
+        if a.starts_with("--emit=") || a.starts_with("-Cincremental=") {
+            i += 1;
+            continue;
+        }
+        if a == "-C" && next.starts_with("opt-level=") {
+            argv.extend(["-C".into(), "opt-level=0".into()]);
+            i += 2;
+            continue;
+        }
+        argv.push(rec.argv[i].clone());
+        i += 1;
+    }
+    argv.extend([emit.into(), "--out-dir".into(), out.to_string_lossy().into_owned()]);
+    argv.extend(["-C".into(), format!("incremental={}", incr.display())]);
+    if emit == "--emit=metadata" {
+        argv.extend(["-Z".into(), "always-encode-mir=yes".into()]);
+    }
+    argv
 }
 
 fn hash<T: Hash + ?Sized>(v: &T) -> u64 {
@@ -103,6 +268,11 @@ fn hash<T: Hash + ?Sized>(v: &T) -> u64 {
 
 /// (everything, everything but the bodies of components)
 fn hashes(text: &str) -> (u64, u64) {
+    if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty())
+        && line.starts_with(yawn_rsx::hotfn::SKELETON)
+    {
+        return (hash(text), hash(line));
+    }
     let mut h = DefaultHasher::new();
     let mut inside = false;
     for line in text.lines() {
@@ -143,18 +313,58 @@ impl Dynamic {
             version: 0,
             lld: None,
             native: Vec::new(),
+            learned: BTreeSet::new(),
+            failures: None,
+            sigs: Sigs::new(),
+            items: Items::new(),
+            overlay: Overlay::new(dev_dir.join("overlay-wasm")),
+            native_overlay: Overlay::new(dev_dir.join("overlay-native")),
+            side_exports: BTreeSet::new(),
         };
+        d.overlay.clear();
+        d.native_overlay.clear();
+        let stamp = d.learned_stamp();
+        d.learned = std::fs::read_to_string(dev_dir.join("learned.txt"))
+            .ok()
+            .filter(|t| t.lines().next() == Some(stamp.as_str()))
+            .map(|t| t.lines().skip(1).filter(|l| !l.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
         d.reset_exports();
         d
     }
 
-    fn scan(&self) -> Snapshot {
+    /// What the learned exports were learned against: their names carry the hashes of the
+    /// crates they come from, which change with the lock file and with `yawn` itself
+    fn learned_stamp(&self) -> String {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&std::fs::read(self.root.join("Cargo.lock")).unwrap_or_default(), &mut h);
+        let exe = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .and_then(|m| m.modified())
+            .ok();
+        std::hash::Hash::hash(&exe, &mut h);
+        format!("# {:016x}", std::hash::Hasher::finish(&h))
+    }
+
+    fn scan(&self) -> (Snapshot, Sigs, Items) {
         let mut files = Vec::new();
         walk(&self.root.join(yawn_rsx::project::OUT_DIR), &mut files);
-        files
-            .into_iter()
-            .filter_map(|p| Some((p.clone(), hashes(&std::fs::read_to_string(&p).ok()?))))
-            .collect()
+        let mut snapshot = Snapshot::new();
+        let mut sigs = Sigs::new();
+        let mut items = Items::new();
+        for p in files {
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            snapshot.insert(p.clone(), hashes(&text));
+            let found = yawn_rsx::hotfn::sigs(&text);
+            if !found.is_empty() {
+                sigs.insert(p.clone(), found);
+            }
+            let list = yawn_rsx::hotfn::items(&text);
+            if !list.is_empty() {
+                items.insert(p, list);
+            }
+        }
+        (snapshot, sigs, items)
     }
 
     /// The route files that live in a crate of their own, with that crate
@@ -186,18 +396,36 @@ impl Dynamic {
                 }
             }
             let leaf =
-                Leaf { dir: dir.clone(), package: yawn_rsx::manifest::member_package(&pkg, &dir) };
-            for line in text.lines() {
-                if let Some(path) =
-                    line.strip_prefix("#[path = \"").and_then(|r| r.strip_suffix("\"]"))
-                {
-                    let path = PathBuf::from(path);
-                    if path.file_name().is_some_and(|n| n == "mod.rs") {
-                        if let Some(parent) = path.parent() {
-                            out.push((parent.to_path_buf(), true, leaf.clone()));
+                Leaf {
+                dir: dir.clone(),
+                package: yawn_rsx::manifest::member_package(&pkg, &dir),
+                server_only: false,
+                sig: false,
+            };
+            let generated = self.root.join(yawn_rsx::project::OUT_DIR);
+            let mut queue: Vec<String> = vec![text];
+            let mut depth = 0;
+            while let Some(text) = queue.pop() {
+                depth += 1;
+                if depth > 400 {
+                    break;
+                }
+                for line in text.lines() {
+                    if let Some(path) =
+                        line.strip_prefix("#[path = \"").and_then(|r| r.strip_suffix("\"]"))
+                    {
+                        let path = PathBuf::from(path);
+                        if path.file_name().is_some_and(|n| n == "mod.rs") {
+                            if let Some(parent) = path.parent() {
+                                out.push((parent.to_path_buf(), true, leaf.clone()));
+                            }
+                            if path.starts_with(&generated) {
+                                queue.push(std::fs::read_to_string(&path).unwrap_or_default());
+                            }
+                        } else {
+                            out.push((path.with_extension(""), true, leaf.clone()));
+                            out.push((path, false, leaf.clone()));
                         }
-                    } else {
-                        out.push((path, false, leaf.clone()));
                     }
                 }
             }
@@ -205,7 +433,7 @@ impl Dynamic {
         out
     }
 
-    fn crates(&self) -> Vec<Leaf> {
+    pub fn crates(&self) -> Vec<Leaf> {
         let mut seen = BTreeSet::new();
         self.owners()
             .into_iter()
@@ -216,12 +444,18 @@ impl Dynamic {
 
     /// Records the generated code the app was just built from
     pub fn remember(&mut self) {
-        self.snapshot = Some(self.scan());
+        let (snapshot, sigs, items) = self.scan();
+        self.items = items;
+        self.snapshot = Some(snapshot);
+        self.sigs = sigs;
     }
 
     /// Compares the generated code with what the app (or the last side module) was built from
     pub fn plan(&mut self) -> Plan {
-        let next = self.scan();
+        let (next, next_sigs, next_items) = self.scan();
+        let prev_sigs = std::mem::replace(&mut self.sigs, next_sigs.clone());
+        let prev_items = std::mem::replace(&mut self.items, next_items.clone());
+        let mut additive: BTreeSet<PathBuf> = BTreeSet::new();
         let Some(prev) = self.snapshot.replace(next.clone()) else {
             return Plan::Full("no baseline".into());
         };
@@ -230,6 +464,11 @@ impl Dynamic {
             match prev.get(path) {
                 Some(before) if before == now => {}
                 Some(before) if before.1 != now.1 => {
+                    if only_added(prev_items.get(path), next_items.get(path)) {
+                        additive.insert(path.clone());
+                        changed.push(path.clone());
+                        continue;
+                    }
                     return Plan::Full(format!("{} changed outside a body", path.display()));
                 }
                 Some(_) => changed.push(path.clone()),
@@ -242,21 +481,70 @@ impl Dynamic {
         if changed.is_empty() {
             return Plan::Nothing;
         }
+        let mut sig_files: BTreeSet<PathBuf> = additive;
+        let mut sig_names: BTreeSet<String> = BTreeSet::new();
+        for path in &changed {
+            let (before, after) = (prev_sigs.get(path), next_sigs.get(path));
+            for key in before.into_iter().chain(after).flat_map(|m| m.keys()) {
+                if before.and_then(|m| m.get(key)) != after.and_then(|m| m.get(key)) {
+                    sig_files.insert(path.clone());
+                    sig_names.insert(key.clone());
+                }
+            }
+        }
+        if !sig_names.is_empty() {
+            let stems: BTreeSet<String> = sig_files
+                .iter()
+                .filter_map(|p| {
+                    let stem = p.file_stem()?.to_string_lossy().into_owned();
+                    if stem == "mod" {
+                        return Some(p.parent()?.file_name()?.to_string_lossy().into_owned());
+                    }
+                    Some(stem)
+                })
+                .collect();
+            let changed_set: BTreeSet<&PathBuf> = changed.iter().collect();
+            for (path, _) in &next {
+                if changed_set.contains(path) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(path) else { continue };
+                if !stems.iter().any(|m| mentions(&text, m)) {
+                    continue;
+                }
+                if let Some(name) = sig_names.iter().find(|n| calls(&text, n)) {
+                    return Plan::Full(format!(
+                        "the signature of `{name}` changed and {} uses it",
+                        path.display()
+                    ));
+                }
+            }
+        }
         let owners = self.owners();
-        let mut out = Vec::new();
-        let mut seen = BTreeSet::new();
+        let mut out: Vec<Leaf> = Vec::new();
+        let generated = self.root.join(yawn_rsx::project::OUT_DIR);
         for path in changed {
+            let server_side = path.strip_prefix(&generated).is_ok_and(|rel| {
+                let rel = rel.strip_prefix(yawn_rsx::mirror::DIR).unwrap_or(rel);
+                rel.starts_with("api") || rel.starts_with("server") || rel == Path::new("server.rs")
+            });
             let owner = owners
                 .iter()
                 .filter(|(p, dir, _)| if *dir { path.starts_with(p) } else { *p == path })
                 .max_by_key(|(p, _, _)| p.components().count())
                 .map(|(_, _, l)| l);
             match owner {
-                Some(leaf) => {
-                    if seen.insert(leaf.dir.clone()) {
-                        out.push(leaf.clone());
+                Some(leaf) => match out.iter_mut().find(|l| l.dir == leaf.dir) {
+                    Some(known) => {
+                        known.server_only &= server_side;
+                        known.sig |= sig_files.contains(&path);
                     }
-                }
+                    None => out.push(Leaf {
+                        server_only: server_side,
+                        sig: sig_files.contains(&path),
+                        ..leaf.clone()
+                    }),
+                },
                 None => return Plan::Full(format!("{} belongs to no crate", path.display())),
             }
         }
@@ -265,6 +553,7 @@ impl Dynamic {
 
     /// The server was rebuilt: the route libraries loaded into the old one are gone with it
     pub fn reset_native(&mut self, dev_dir: &Path) {
+        self.native_overlay.clear();
         let _ = std::fs::remove_dir_all(dev_dir.join("native"));
         let _ = std::fs::create_dir_all(dev_dir);
         let _ = std::fs::write(dev_dir.join("native.json"), "[]");
@@ -281,12 +570,26 @@ impl Dynamic {
         kill: &KillGroup,
         on: &mut dyn FnMut(&Parsed),
     ) -> Result<(), SideError> {
+        let rlib = Self::native_cargo(&self.root, leaf, args, env, kill, on)?;
+        self.link_native(leaf, &rlib, dev_dir)
+    }
+
+    /// The cargo half of [`build_native`](Self::build_native): compiles the route's library. It
+    /// needs nothing of the session, so it can run while a side module is built
+    pub fn native_cargo(
+        root: &Path,
+        leaf: &Leaf,
+        args: &[&str],
+        env: &[(String, String)],
+        kill: &KillGroup,
+        on: &mut dyn FnMut(&Parsed),
+    ) -> Result<PathBuf, SideError> {
         let fallback = |why: &str| SideError::Fallback(why.to_string());
         if !cfg!(unix) {
             return Err(fallback("route libraries need a unix server"));
         }
         let mut rlib = None;
-        let run = cargo::run_with(args, &self.root, kill, env, |p| {
+        let run = cargo::run_with(args, root, kill, env, |p| {
             if let Parsed::Artifact(a) = p {
                 for f in &a.files {
                     let name = f.file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -301,42 +604,217 @@ impl Dynamic {
         if !run.ok {
             return Err(SideError::Failed);
         }
-        let rlib = rlib.ok_or_else(|| fallback("cargo reported no library"))?;
-        let data = std::fs::read(&rlib).map_err(|e| fallback(&e.to_string()))?;
+        rlib.ok_or_else(|| fallback("cargo reported no library"))
+    }
+
+    /// [`native_cargo`](Self::native_cargo) without cargo: the rustc command cargo ran for the crate
+    /// runs again, so the build skips cargo's own check of the whole dependency graph
+    pub fn native_rustc(
+        dev_dir: &Path,
+        tmp: &str,
+        leaf: &Leaf,
+        rec: &Recorded,
+        kill: &KillGroup,
+        on: &mut dyn FnMut(&Parsed),
+    ) -> Result<PathBuf, SideError> {
+        let fallback = |why: &str| SideError::Fallback(why.to_string());
+        if !cfg!(unix) {
+            return Err(fallback("route libraries need a unix server"));
+        }
+        let _turn = NATIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let work = dev_dir.join(tmp).join(&leaf.dir);
+        let incr = dev_dir.join("native-incr").join(&leaf.dir);
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).map_err(|e| fallback(&e.to_string()))?;
+        let argv = native_argv(rec, &work, &incr, "--emit=link");
+        let t = std::time::Instant::now();
+        let ok = replay::run_recorded(&argv, &rec.env, &rec.cwd, kill, on)
+            .map_err(|e| fallback(&e.to_string()))?;
+        if std::env::var_os("YAWN_PROFILE").is_some() {
+            eprintln!("SIDE-PROF {} native-rustc {:?}", leaf.dir, t.elapsed());
+        }
+        if !ok {
+            return Err(SideError::Failed);
+        }
+        std::fs::read_dir(&work)
+            .ok()
+            .and_then(|rd| {
+                rd.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "rlib"))
+            })
+            .ok_or_else(|| fallback("rustc produced no library"))
+    }
+
+    /// [`build_side`](Self::build_side) for leaves one of which changed a public signature, or after
+    /// one did: the crates between are rebuilt as metadata and the leaves link as modules, the ones
+    /// the others call first
+    pub fn build_side_overlay(
+        &mut self,
+        leaves: &[Leaf],
+        recs: &BTreeMap<String, Recorded>,
+        dist: &Path,
+        kill: &KillGroup,
+        on: &mut dyn FnMut(&Parsed),
+    ) -> Result<(), SideError> {
+        let fallback = |why: &str| SideError::Fallback(why.to_string());
+        let lld = self.linker().ok_or_else(|| fallback("rust-lld not found"))?;
+        let _turn = SIDE.lock().unwrap_or_else(|e| e.into_inner());
+        let app = yawn_rsx::manifest::package_name(&self.root).unwrap_or_else(|| "app".into());
+        let prefix = overlay::prefix(&app);
+        let names: Vec<String> = leaves
+            .iter()
+            .filter(|l| !l.server_only)
+            .map(|l| overlay::crate_name(&l.package))
+            .collect();
+        if names.is_empty() {
+            return Ok(());
+        }
+        let dev_dir = self.dev_dir.clone();
+        let argv = |rec: &Recorded, out: &Path, incr: &Path, emit: &str| side_argv_emit(rec, out, incr, emit);
+        let t0 = std::time::Instant::now();
+        let built = overlay::run(
+            &overlay::Build {
+                prefix: &prefix,
+                overlay: &self.overlay,
+                recs,
+                argv: &argv,
+                incr: &|n: &str| dev_dir.join("dyn-incr").join(n.strip_prefix(&prefix).unwrap_or(n)),
+            },
+            &names,
+            kill,
+            on,
+        )?;
+        if std::env::var_os("YAWN_PROFILE").is_some() {
+            eprintln!("SIDE-PROF overlay chain {:?}", t0.elapsed());
+        }
+        let key = built
+            .iter()
+            .filter(|(_, _, full)| *full)
+            .filter_map(|(name, _, _)| leaves.iter().find(|l| overlay::crate_name(&l.package) == *name))
+            .map(|l| l.dir.clone())
+            .collect::<Vec<_>>()
+            .join("+");
+        let parts: Vec<(PathBuf, bool)> = built.iter().map(|(_, rlib, full)| (rlib.clone(), !full)).collect();
+        let work = self.dev_dir.join("dyn-tmp").join(&key);
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).map_err(|e| fallback(&e.to_string()))?;
+        self.finish_modules(&key, &parts, dist, &work, &lld, t0)?;
+        Ok(())
+    }
+
+    /// The server's half of [`build_side_overlay`](Self::build_side_overlay): the libraries of the
+    /// leaves, in the order to link and load them in
+    pub fn native_overlay_chain(
+        dev_dir: &Path,
+        overlay: &Overlay,
+        prefix: &str,
+        recs: &BTreeMap<String, Recorded>,
+        leaves: &[Leaf],
+        kill: &KillGroup,
+        on: &mut dyn FnMut(&Parsed),
+    ) -> Result<Vec<(String, PathBuf, bool)>, SideError> {
+        let _turn = NATIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let names: Vec<String> = leaves.iter().map(|l| overlay::crate_name(&l.package)).collect();
+        let argv = |rec: &Recorded, out: &Path, incr: &Path, emit: &str| native_argv(rec, out, incr, emit);
+        let t0 = std::time::Instant::now();
+        let built = overlay::run(
+            &overlay::Build {
+                prefix,
+                overlay,
+                recs,
+                argv: &argv,
+                incr: &|n: &str| dev_dir.join("native-incr").join(n.strip_prefix(prefix).unwrap_or(n)),
+            },
+            &names,
+            kill,
+            on,
+        )?;
+        if std::env::var_os("YAWN_PROFILE").is_some() {
+            eprintln!("SIDE-PROF native overlay chain {:?}", t0.elapsed());
+        }
+        Ok(built)
+    }
+
+    /// The linking half of [`build_native`](Self::build_native)
+    pub fn link_native(
+        &mut self,
+        leaf: &Leaf,
+        rlib: &Path,
+        dev_dir: &Path,
+    ) -> Result<(), SideError> {
+        self.link_native_parts(&leaf.dir, &[(rlib.to_path_buf(), false)], dev_dir)
+    }
+
+    /// The library of one or more libraries: the objects of those flagged `false` go in whole, those
+    /// of the others only as far as something needs them
+    pub fn link_native_parts(
+        &mut self,
+        key: &str,
+        parts: &[(PathBuf, bool)],
+        dev_dir: &Path,
+    ) -> Result<(), SideError> {
+        let fallback = |why: &str| SideError::Fallback(why.to_string());
         let work = dev_dir.join("native");
-        let tmp = work.join(format!("{}.objects", leaf.dir));
+        let tmp = work.join(format!("{key}.objects"));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).map_err(|e| fallback(&e.to_string()))?;
         let mut objects = Vec::new();
-        for (i, (name, body)) in ar_objects(&data).into_iter().enumerate() {
-            let path = tmp.join(format!("{i}-{}", name.replace('/', "_")));
-            let body = elf_unshare(body).map_err(|e| fallback(&e))?;
-            std::fs::write(&path, body).map_err(|e| fallback(&e.to_string()))?;
-            objects.push(path);
+        let mut lazy = Vec::new();
+        for (n, (rlib, lazily)) in parts.iter().enumerate() {
+            let data = std::fs::read(rlib).map_err(|e| fallback(&e.to_string()))?;
+            for (i, (name, body)) in ar_objects(&data).into_iter().enumerate() {
+                let path = tmp.join(format!("{n}-{i}-{}", name.replace('/', "_")));
+                let body = elf_unshare(body).map_err(|e| fallback(&e))?;
+                std::fs::write(&path, body).map_err(|e| fallback(&e.to_string()))?;
+                if *lazily { lazy.push(path) } else { objects.push(path) }
+            }
         }
         if objects.is_empty() {
             return Err(fallback("the route library has no object code"));
         }
         self.version += 1;
-        let out = work.join(format!("{}.{}.so", leaf.dir, self.version));
-        let mut cc = Command::new("cc");
-        if cfg!(target_os = "macos") {
-            cc.args(["-dynamiclib", "-undefined", "dynamic_lookup", "-o"]);
-        } else {
-            cc.args(["-shared", "-Wl,-Bsymbolic", "-o"]);
+        let out = work.join(format!("{}.{}.so", key, self.version));
+        let t = std::time::Instant::now();
+        let link = |fast: Option<&str>| {
+            let mut cc = Command::new("cc");
+            if cfg!(target_os = "macos") {
+                cc.args(["-dynamiclib", "-undefined", "dynamic_lookup", "-o"]);
+            } else {
+                cc.args(["-shared", "-Wl,-Bsymbolic"]);
+                if let Some(ld) = fast {
+                    cc.arg(format!("-fuse-ld={ld}"));
+                }
+                cc.arg("-o");
+            }
+            cc.arg(&out).args(&objects);
+            match fast {
+                Some(_) if !lazy.is_empty() => {
+                    cc.arg("-Wl,--start-lib").args(&lazy).arg("-Wl,--end-lib");
+                }
+                _ => {
+                    cc.args(&lazy);
+                }
+            }
+            cc.output()
+        };
+        let fast = if cfg!(target_os = "macos") { None } else { fast_linker() };
+        let mut linked = link(fast).map_err(|e| fallback(&e.to_string()))?;
+        if fast.is_some() && !linked.status.success() {
+            linked = link(None).map_err(|e| fallback(&e.to_string()))?;
         }
-        let linked = cc.arg(&out).args(&objects).output().map_err(|e| fallback(&e.to_string()))?;
+        if std::env::var_os("YAWN_PROFILE").is_some() {
+            eprintln!("SIDE-PROF {} so-link {:?} ({})", key, t.elapsed(), fast.unwrap_or("cc"));
+        }
         let _ = std::fs::remove_dir_all(&tmp);
         if !linked.status.success() {
             return Err(fallback(&String::from_utf8_lossy(&linked.stderr)));
         }
         self.native.retain(|(d, old)| {
-            if d == &leaf.dir {
+            if d == &key {
                 let _ = std::fs::remove_file(old);
             }
-            d != &leaf.dir
+            d != &key
         });
-        self.native.push((leaf.dir.clone(), out));
+        self.native.push((key.to_string(), out));
         let list: Vec<String> =
             self.native.iter().map(|(_, p)| p.to_string_lossy().into_owned()).collect();
         std::fs::write(
@@ -352,12 +830,56 @@ impl Dynamic {
 
     /// The app was rebuilt: what side modules there were are older than it
     pub fn reset(&mut self, dist: &Path) -> std::io::Result<()> {
+        self.overlay.clear();
+        self.side_exports.clear();
         let dir = self.dyn_dir(dist);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("manifest.json"), r#"{"modules":[]}"#)?;
         std::fs::write(dist.join("pkg").join("yawn-pic.js"), LOADER)?;
         Ok(())
+    }
+
+    /// What `core` and `alloc` define to report a failure: a body compiled differently from the app
+    /// can call any of them, and the app only has the ones it calls itself
+    fn failure_symbols(&mut self) -> BTreeSet<String> {
+        if let Some(found) = &self.failures {
+            return found.clone();
+        }
+        let mut found = BTreeSet::new();
+        let sysroot = Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let dir = Path::new(&sysroot).join("lib/rustlib/wasm32-unknown-unknown/lib");
+        for lib in ["libcore-", "liballoc-"] {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !(name.starts_with(lib) && name.ends_with(".rlib")) {
+                    continue;
+                }
+                let Ok(data) = std::fs::read(e.path()) else { continue };
+                for (_, obj) in ar_objects(&data) {
+                    let Some(scan) = wasm_scan(obj) else { continue };
+                    for n in scan.defined {
+                        let fail = n.contains("9panicking")
+                            || n.contains("panic_")
+                            || n.contains("expect_failed")
+                            || n.contains("unwrap_failed")
+                            || n.contains("_fail")
+                            || n.contains("handle_alloc_error")
+                            || n.contains("capacity_overflow");
+                        if fail && n.starts_with("_R") {
+                            found.insert(n);
+                        }
+                    }
+                }
+            }
+        }
+        self.failures = Some(found.clone());
+        found
     }
 
     pub fn linker(&mut self) -> Option<PathBuf> {
@@ -392,36 +914,19 @@ impl Dynamic {
     ) -> Result<(), SideError> {
         let fallback = |why: &str| SideError::Fallback(why.to_string());
         let lld = self.linker().ok_or_else(|| fallback("rust-lld not found"))?;
+        let _turn = SIDE.lock().unwrap_or_else(|e| e.into_inner());
         let work = self.dev_dir.join("dyn-tmp").join(&leaf.dir);
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&work).map_err(|e| fallback(&e.to_string()))?;
-        let mut argv = Vec::new();
-        let mut i = 0;
-        while i < rec.argv.len() {
-            let a = rec.argv[i].as_str();
-            let next = rec.argv.get(i + 1).map(String::as_str).unwrap_or("");
-            if a == "--emit" || a == "--out-dir" || (a == "-C" && next.starts_with("incremental="))
-            {
-                i += 2;
-                continue;
-            }
-            if a.starts_with("--emit=") || a.starts_with("-Cincremental=") {
-                i += 1;
-                continue;
-            }
-            argv.push(rec.argv[i].clone());
-            i += 1;
-        }
-        argv.extend([
-            "--emit=link".into(),
-            "--out-dir".into(),
-            work.to_string_lossy().into_owned(),
-        ]);
-        argv.extend(["-C".into(), "relocation-model=pic".into()]);
         let incr = self.dev_dir.join("dyn-incr").join(&leaf.dir);
-        argv.extend(["-C".into(), format!("incremental={}", incr.display())]);
+        let argv = side_argv(rec, &work, &incr);
+        let prof = std::env::var_os("YAWN_PROFILE").is_some();
+        let t0 = std::time::Instant::now();
         let ok = replay::run_recorded(&argv, &rec.env, &rec.cwd, kill, on)
             .map_err(|e| fallback(&e.to_string()))?;
+        if prof {
+            eprintln!("SIDE-PROF {} rustc {:?}", leaf.dir, t0.elapsed());
+        }
         if !ok {
             return Err(SideError::Failed);
         }
@@ -431,21 +936,57 @@ impl Dynamic {
                 rd.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "rlib"))
             })
             .ok_or_else(|| fallback("rustc produced no library"))?;
-        let data = std::fs::read(&rlib).map_err(|e| fallback(&e.to_string()))?;
+        self.finish_side(leaf, &rlib, dist, &work, &lld, t0)
+    }
+
+    /// The linking half of [`build_side`](Self::build_side): the module the page loads, made of the
+    /// objects of the library
+    fn finish_side(
+        &mut self,
+        leaf: &Leaf,
+        rlib: &Path,
+        dist: &Path,
+        work: &Path,
+        lld: &Path,
+        t0: std::time::Instant,
+    ) -> Result<(), SideError> {
+        self.finish_modules(&leaf.dir, &[(rlib.to_path_buf(), false)], dist, work, lld, t0)
+    }
+
+    /// The module of one or more libraries: the objects of those flagged `false` go in whole, those of
+    /// the others only as far as something needs them
+    fn finish_modules(
+        &mut self,
+        key: &str,
+        parts: &[(PathBuf, bool)],
+        dist: &Path,
+        work: &Path,
+        lld: &Path,
+        t0: std::time::Instant,
+    ) -> Result<(), SideError> {
+        let fallback = |why: &str| SideError::Fallback(why.to_string());
+        let prof = std::env::var_os("YAWN_PROFILE").is_some();
         let mut objects = Vec::new();
-        for (i, (name, body)) in ar_objects(&data).into_iter().enumerate() {
-            let path = work.join(format!("{i}-{}", name.replace('/', "_")));
-            let body = wasm_unshare(body).map_err(|e| fallback(&e))?;
-            std::fs::write(&path, body).map_err(|e| fallback(&e.to_string()))?;
-            objects.push(path);
+        let mut lazy = Vec::new();
+        for (n, (rlib, lazily)) in parts.iter().enumerate() {
+            let data = std::fs::read(rlib).map_err(|e| fallback(&e.to_string()))?;
+            for (i, (name, body)) in ar_objects(&data).into_iter().enumerate() {
+                let path = work.join(format!("{n}-{i}-{}", name.replace('/', "_")));
+                let body = wasm_unshare(body).map_err(|e| fallback(&e))?;
+                std::fs::write(&path, body).map_err(|e| fallback(&e.to_string()))?;
+                if *lazily { lazy.push(path) } else { objects.push(path) }
+            }
         }
         if objects.is_empty() {
             return Err(fallback("the route library has no object code"));
         }
+        if prof {
+            eprintln!("SIDE-PROF {} unshare {:?} objects {}", key, t0.elapsed(), objects.len());
+        }
         self.version += 1;
-        let file = format!("{}.{}.wasm", leaf.dir, self.version);
+        let file = format!("{}.{}.wasm", key, self.version);
         let out = work.join("side.wasm");
-        let status = Command::new(&lld)
+        let status = Command::new(lld)
             .args([
                 "-flavor",
                 "wasm",
@@ -458,13 +999,19 @@ impl Dynamic {
             ])
             .arg(&out)
             .args(&objects)
+            .args(if lazy.is_empty() { vec![] } else { vec![std::ffi::OsString::from("--start-lib")] })
+            .args(&lazy)
+            .args(if lazy.is_empty() { vec![] } else { vec![std::ffi::OsString::from("--end-lib")] })
             .output()
             .map_err(|e| fallback(&e.to_string()))?;
         if !status.status.success() {
             return Err(fallback(&String::from_utf8_lossy(&status.stderr)));
         }
+        if prof {
+            eprintln!("SIDE-PROF {} lld {:?}", key, t0.elapsed());
+        }
         let bytes = std::fs::read(&out).map_err(|e| fallback(&e.to_string()))?;
-        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(work);
         let imports = wasm_imports(&bytes).ok_or_else(|| fallback("unreadable side module"))?;
         let own: BTreeSet<String> = wasm_exports(&bytes).unwrap_or_default().into_iter().collect();
         let main: BTreeSet<String> = std::fs::read(dist.join("pkg").join("app_bg.wasm"))
@@ -481,6 +1028,7 @@ impl Dynamic {
             "__memory_base",
             "__table_base",
         ];
+        let mut missing = Vec::new();
         for (m, n) in &imports {
             if m == "env" && SHARED.contains(&n.as_str()) {
                 continue;
@@ -495,14 +1043,28 @@ impl Dynamic {
                 continue;
             }
             if m == "GOT.func" || m == "GOT.mem" {
-                if own.contains(n) || main.contains(n) {
+                if own.contains(n) || main.contains(n) || self.side_exports.contains(n) {
                     continue;
                 }
-            } else if m == "env" && main.contains(n) {
+            } else if m == "env" && (main.contains(n) || self.side_exports.contains(n)) {
                 continue;
             }
+            missing.push((m.clone(), n.clone()));
+        }
+        if let Some((m, n)) = missing.first() {
+            for (_, n) in &missing {
+                self.learned.insert(n.clone());
+            }
+            let stamp = self.learned_stamp();
+            let mut text: Vec<&str> = vec![stamp.as_str()];
+            text.extend(self.learned.iter().map(String::as_str));
+            let _ = std::fs::write(self.dev_dir.join("learned.txt"), text.join("\n"));
             return Err(fallback(&format!("the app does not export `{m}.{n}`")));
         }
+        if prof {
+            eprintln!("SIDE-PROF {} checks {:?}", key, t0.elapsed());
+        }
+        self.side_exports.extend(own.iter().cloned());
         let dir = self.dyn_dir(dist);
         std::fs::create_dir_all(&dir).map_err(|e| fallback(&e.to_string()))?;
         std::fs::write(dir.join(&file), &bytes).map_err(|e| fallback(&e.to_string()))?;
@@ -524,12 +1086,12 @@ impl Dynamic {
             })
             .unwrap_or_default();
         for (route, url) in &modules {
-            if route == &leaf.dir && *url != file {
+            if route == &key && *url != file {
                 let _ = std::fs::remove_file(dir.join(url));
             }
         }
-        modules.retain(|(route, _)| route != &leaf.dir);
-        modules.push((leaf.dir.clone(), file));
+        modules.retain(|(route, _)| route != &key);
+        modules.push((key.to_string(), file));
         let json = serde_json::json!({
             "modules": modules.iter().map(|(r, u)| serde_json::json!({"route": r, "url": u})).collect::<Vec<_>>()
         });
@@ -566,7 +1128,10 @@ impl Dynamic {
             "routes_",
         )
         .replace('-', "_");
+        wanted.extend(self.learned.iter().cloned());
+        wanted.extend(self.failure_symbols());
         wanted.retain(|n| !n.contains(&routes));
+        wanted.retain(|n| !n.starts_with("__yawn_pub_"));
         wanted.retain(|n| {
             !matches!(
                 n.as_str(),
@@ -696,8 +1261,11 @@ impl Dynamic {
             let scan = if elf.is_some() { elf_scan(obj) } else { wasm_scan(obj) };
             if let Some(scan) = scan {
                 if let Some(dir) = elf
-                    && (scan.unshareable || !scan.writable.is_empty())
+                    && scan.unshareable
                 {
+                    if std::env::var_os("YAWN_PROFILE").is_some() {
+                        eprintln!("BLOCKED {dir} {:?}", scan.reasons.iter().take(3).collect::<Vec<_>>());
+                    }
                     self.blocked.insert(dir.to_string());
                 }
                 defined.extend(scan.defined);
@@ -874,6 +1442,11 @@ struct Scan {
     writable: BTreeSet<String>,
     /// Mutable statics that have no name to share by
     unshareable: bool,
+    reasons: Vec<String>,
+}
+
+fn is_registration(name: &str) -> bool {
+    name.ends_with("___INVENTORY")
 }
 
 fn writable_segment(name: &str) -> bool {
@@ -1116,12 +1689,18 @@ fn elf_symbols(d: &mut [u8], rewrite: bool) -> Option<Scan> {
             }
             let n = e.cstr(strtab + name);
             if bind == 0 {
+                if kind == 6 && shndx != 0 {
+                    scan.unshareable = true;
+                    scan.reasons.push(format!("tls {n}"));
+                }
                 if shndx != 0
                     && shndx < 0xff00
                     && sections.get(shndx).is_some_and(|s| writable_segment(&s.0))
                     && kind == 1
+                    && !is_registration(&n)
                 {
                     scan.unshareable = true;
+                    scan.reasons.push(format!("local {} in {}", n, sections[shndx].0));
                 }
                 continue;
             }
@@ -1135,6 +1714,7 @@ fn elf_symbols(d: &mut [u8], rewrite: bool) -> Option<Scan> {
                         || sections[shndx].0.starts_with(".tdata")
                     {
                         scan.unshareable = true;
+                        scan.reasons.push(format!("tls {n}"));
                     } else if kind == 1 && !n.starts_with("DW.ref.") {
                         scan.writable.insert(n);
                         patches.push(at);
@@ -1161,10 +1741,21 @@ fn elf_scan(d: &[u8]) -> Option<Scan> {
 /// have a second copy of the variable, and code of the app can't be made to share it
 fn elf_unshare(d: &[u8]) -> Result<Vec<u8>, String> {
     let mut copy = d.to_vec();
-    let scan = elf_symbols(&mut copy, false).ok_or("unreadable object")?;
-    if scan.unshareable || !scan.writable.is_empty() {
-        let name = scan.writable.iter().next().cloned().unwrap_or_default();
-        return Err(format!("the crate has a mutable static {name}"));
+    let scan = elf_symbols(&mut copy, true).ok_or("unreadable object")?;
+    if scan.unshareable {
+        let name = scan.reasons.first().cloned().unwrap_or_default();
+        return Err(format!("the crate has a private mutable static {name}"));
     }
-    Ok(d.to_vec())
+    Ok(copy)
+}
+
+/// A faster linker than the default one for the `.so` of a swap, when the machine has it
+fn fast_linker() -> Option<&'static str> {
+    static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        ["mold", "lld"].into_iter().find(|name| {
+            let bin = if *name == "lld" { "ld.lld" } else { "mold" };
+            Command::new(bin).arg("--version").output().is_ok_and(|o| o.status.success())
+        })
+    })
 }

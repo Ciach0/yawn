@@ -98,6 +98,27 @@ pub fn classify(
     {
         return Some(Change::Client);
     }
+    // A plain module whose functions a dev build can replace: a change of its body is the client's
+    if rel_str.starts_with("src/")
+        && rel.extension().is_some_and(|e| e == "rs")
+        && let Ok(under_src) = rel.strip_prefix("src")
+        && root
+            .join(yawn_rsx::project::OUT_DIR)
+            .join(yawn_rsx::mirror::DIR)
+            .join(under_src)
+            .is_file()
+    {
+        return Some(Change::Client);
+    }
+    // Handlers (when no mirror of them exists yet) and the server's own modules never reach the browser
+    if (rel_str.starts_with("src/api/")
+        || rel_str.starts_with("src/server/")
+        || rel_str == "src/server.rs")
+        && rel.extension().is_some_and(|e| e == "rs")
+    {
+        return Some(Change::Server);
+    }
+
     // Any other source is both!!
     rel_str.starts_with("src/").then_some(Change::Both)
 }
@@ -242,9 +263,9 @@ mod tests {
         assert_eq!(c("/p/src/api/x.rsx"), Some(Change::Both));
         assert_eq!(c("/p/src/ui/button.rs"), Some(Change::Both));
         assert_eq!(c("/p/src/main.rs"), Some(Change::Server));
-        assert_eq!(c("/p/src/server/db.rs"), Some(Change::Both));
-        assert_eq!(c("/p/src/server.rs"), Some(Change::Both));
-        assert_eq!(c("/p/src/api/users/[id].rs"), Some(Change::Both));
+        assert_eq!(c("/p/src/server/db.rs"), Some(Change::Server), "compiled for the server only");
+        assert_eq!(c("/p/src/server.rs"), Some(Change::Server));
+        assert_eq!(c("/p/src/api/users/[id].rs"), Some(Change::Server));
         assert_eq!(c("/p/Cargo.toml"), Some(Change::Both));
         assert_eq!(c("/lib/src/ui/card.rsx"), Some(Change::Both));
         assert_eq!(c("/lib/src/.hidden"), None);

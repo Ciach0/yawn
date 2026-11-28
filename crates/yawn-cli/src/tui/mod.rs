@@ -87,7 +87,7 @@ fn handle(app: &mut App, msg: Msg) -> Act {
             Act::Redraw
         }
         Msg::Input(TermEvent::Key(k)) => app.on_key(k),
-        Msg::Input(TermEvent::Resize(..)) => Act::Redraw,
+        Msg::Input(TermEvent::Resize(..)) => Act::Reflow,
         Msg::Input(_) => Act::Nothing,
     }
 }
@@ -128,6 +128,7 @@ fn event_loop(
                 Err(_) => break,
             }
         };
+        let mut reflow = false;
         let mut acts = vec![handle(&mut app, first)];
         for _ in 0..BATCH {
             match pipe.rx.try_recv() {
@@ -142,7 +143,12 @@ fn event_loop(
         for act in acts {
             dirty |= act != Act::Nothing;
             match act {
-                Act::Clear => clear(term)?,
+                Act::Clear => {
+                    app.history.clear();
+                    app.pending.clear();
+                    reflow = true;
+                }
+                Act::Reflow => reflow = true,
                 Act::Resize => resize(term, &mut app)?,
                 Act::Open(url) => {
                     if let Err(e) = open_url(&url) {
@@ -157,6 +163,10 @@ fn event_loop(
                 Act::Nothing | Act::Redraw => {}
             }
         }
+        if reflow {
+            reprint(term, &mut app)?;
+            dirty = true;
+        }
     }
     Ok(app.state.summary().clone())
 }
@@ -167,10 +177,13 @@ fn print_logs(term: &mut Term, app: &mut App, theme: &Theme) -> io::Result<()> {
         return Ok(());
     }
     let width = term.size()?.width as usize;
-    let lines: Vec<_> = std::mem::take(&mut app.pending)
-        .iter()
-        .flat_map(|e| view::log_lines(e, theme, width))
-        .collect();
+    let printed = std::mem::take(&mut app.pending);
+    let lines: Vec<_> = printed.iter().flat_map(|e| view::log_lines(e, theme, width)).collect();
+    app.history.extend(printed);
+    if app.history.len() > app::HISTORY {
+        let extra = app.history.len() - app::HISTORY;
+        app.history.drain(..extra);
+    }
     for chunk in lines.chunks(LINES_PER_INSERT) {
         let height = chunk.len() as u16;
         let paragraph = Paragraph::new(chunk.to_vec());
@@ -181,11 +194,20 @@ fn print_logs(term: &mut Term, app: &mut App, theme: &Theme) -> io::Result<()> {
     Ok(())
 }
 
-fn clear(term: &mut Term) -> io::Result<()> {
-    stdout().execute(Clear(ClearType::All))?.execute(Clear(ClearType::Purge))?;
-    let frame = term.get_frame().area();
-    let below = term.size()?.height.saturating_sub(frame.y + frame.height);
-    term.insert_before(below, |_| {})
+/// Wipes the screen and the scrollback, opens the panel at the top and queues what was printed
+/// before to be printed again (at the width the terminal has now), so that a resize or a clear
+/// always leaves a consistent screen
+fn reprint(term: &mut Term, app: &mut App) -> io::Result<()> {
+    if app.more && app.rustc.is_none() {
+        app.rustc = Some(rustc_version());
+    }
+    let mut out = stdout();
+    out.execute(Clear(ClearType::All))?.execute(Clear(ClearType::Purge))?.execute(MoveTo(0, 0))?;
+    *term = open(app.height())?;
+    let mut again = std::mem::take(&mut app.history);
+    again.append(&mut app.pending);
+    app.pending = again;
+    Ok(())
 }
 
 /// A new inline panel of the height the command list needs; ratatui can't resize one. When the
@@ -267,11 +289,11 @@ mod tests {
     use ratatui::crossterm::event::KeyCode;
 
     #[test]
-    fn events_and_resizes_redraw_but_focus_does_not() {
+    fn events_redraw_resizes_reflow_but_focus_does_not() {
         let mut a = app();
         let ev = Event::Log(LogEvent::new(Duration::ZERO, Level::Info, "s", "x"));
         assert_eq!(handle(&mut a, Msg::Event(ev)), Act::Redraw);
-        assert_eq!(handle(&mut a, Msg::Input(TermEvent::Resize(80, 24))), Act::Redraw);
+        assert_eq!(handle(&mut a, Msg::Input(TermEvent::Resize(80, 24))), Act::Reflow);
         assert_eq!(handle(&mut a, Msg::Input(TermEvent::FocusGained)), Act::Nothing);
         assert_eq!(handle(&mut a, Msg::Input(TermEvent::Key(key(KeyCode::F(9))))), Act::Nothing);
         assert_eq!(a.pending.len(), 1);

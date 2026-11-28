@@ -58,6 +58,8 @@ struct Cmd {
     key: String,
     externs: Vec<String>,
     linked: bool,
+    /// Where in the log the command was read, so the latest of two for a crate can be told
+    seq: u64,
 }
 
 impl Cmd {
@@ -119,6 +121,7 @@ impl Cmd {
             out_dir: out_dir?,
             externs,
             linked,
+            seq: 0,
         })
     }
 }
@@ -275,6 +278,7 @@ pub struct Lane {
     deps: HashMap<PathBuf, DepInfo>,
     current: HashSet<String>,
     complete: bool,
+    seq: u64,
 }
 
 impl Lane {
@@ -303,6 +307,7 @@ impl Lane {
             deps: HashMap::new(),
             current: HashSet::new(),
             complete: false,
+            seq: 0,
         })
     }
 
@@ -320,7 +325,18 @@ impl Lane {
     pub fn recorded(&mut self, crate_name: &str) -> Option<Recorded> {
         self.learn();
         let prefix = format!("{crate_name}-");
-        self.cmds.values().find(|c| c.key.starts_with(&prefix)).map(Recorded::from)
+        let mut found: Vec<&Cmd> = self.cmds.values().filter(|c| c.key.starts_with(&prefix)).collect();
+        found.sort_by_key(|c| (!self.current.contains(&c.key), std::cmp::Reverse(c.seq)));
+        if std::env::var_os("YAWN_PROFILE_REC").is_some() && (crate_name.ends_with("layer1") || crate_name.ends_with("layer0_2")) {
+            eprintln!(
+                "REC {crate_name}: {} candidates, current {} of {}, picked current={:?}",
+                found.len(),
+                self.current.len(),
+                self.cmds.len(),
+                found.first().map(|c| self.current.contains(&c.key))
+            );
+        }
+        found.first().copied().map(Recorded::from)
     }
 
     /// The command that links the server binary
@@ -382,7 +398,9 @@ impl Lane {
         }
         self.pos += text.len() as u64;
         for line in text.lines() {
-            if let Some(c) = Cmd::parse(line) {
+            if let Some(mut c) = Cmd::parse(line) {
+                self.seq += 1;
+                c.seq = self.seq;
                 self.cmds.insert(c.key.clone(), c);
             }
         }

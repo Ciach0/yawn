@@ -108,7 +108,22 @@ pub fn parse_json_line(line: &str) -> Option<Parsed> {
                 "warning" => Level::Warn,
                 _ => return None,
             };
-            let message = m.get("message")?.as_str()?.to_string();
+            let mut message = m.get("message")?.as_str()?.to_string();
+            if message.starts_with("linking with") {
+                let detail: Vec<&str> = m
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.get("message")?.as_str())
+                    .flat_map(str::lines)
+                    .filter(|l| l.contains("error:") || l.contains("undefined symbol") || l.contains("duplicate symbol"))
+                    .take(6)
+                    .collect();
+                if !detail.is_empty() {
+                    message = format!("{message}: {}", detail.join("; "));
+                }
+            }
             // Summary lines ("aborting due to ...", "2 warnings emitted") aren't diagnostics.
             if message.starts_with("aborting due to")
                 || message.contains(" emitted") && m.get("spans")?.as_array()?.is_empty()

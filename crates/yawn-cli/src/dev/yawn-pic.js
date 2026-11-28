@@ -49,6 +49,10 @@ function dylinkInfo(bytes) {
 
 const align = (n, a) => Math.ceil(n / a) * a;
 
+// What the modules loaded so far export, for the functions the app lacks: a public function with a
+// new signature is a new symbol that only the module with it defines
+const side = new Map();
+
 function globals(module, name) {
   const out = {};
   for (const im of WebAssembly.Module.imports(module)) {
@@ -77,7 +81,7 @@ async function loadSide(main, url, wbg) {
   const mems = globals(module, 'GOT.mem');
   for (const im of WebAssembly.Module.imports(module)) {
     if (im.module === 'env' && im.kind === 'function') {
-      const f = ex[im.name];
+      const f = ex[im.name] ?? side.get(im.name);
       if (typeof f !== 'function') throw new Error('the app has no `' + im.name + '`');
       env[im.name] = f;
     }
@@ -93,7 +97,7 @@ async function loadSide(main, url, wbg) {
   const instance = await WebAssembly.instantiate(module, { env, 'GOT.func': funcs, 'GOT.mem': mems, __wbindgen_placeholder__: placeholder });
   const own = instance.exports;
   for (const [name, g] of Object.entries(funcs)) {
-    const f = own[name] ?? ex[name];
+    const f = own[name] ?? ex[name] ?? side.get(name);
     if (typeof f !== 'function') throw new Error('unresolved function ' + name);
     g.value = table.grow(1);
     table.set(g.value, f);
@@ -103,12 +107,41 @@ async function loadSide(main, url, wbg) {
     else if (ex[name] instanceof WebAssembly.Global) g.value = ex[name].value;
     else throw new Error('unresolved data ' + name);
   }
+  for (const [name, f] of Object.entries(own)) {
+    if (typeof f === 'function') side.set(name, f);
+  }
   own.__wasm_apply_data_relocs?.();
   own.__wasm_call_ctors?.();
   for (const [name, f] of Object.entries(own)) {
     if (typeof f === 'function' && name.includes('__yawn_register')) f();
   }
 }
+
+// What the page has loaded, to load only what a later build added
+let page = null;
+
+// Loads the modules a build added since and has the app build its components again with them.
+// Returns how many modules came, or -1 when this page has no module to load into
+globalThis.__yawn_refresh = async () => {
+  if (!page) return -1;
+  const t0 = performance.now();
+  const res = await fetch(new URL('./dyn/manifest.json', page.baseUrl), { cache: 'no-store' });
+  if (!res.ok) return -1;
+  const manifest = await res.json();
+  const t1 = performance.now();
+  let count = 0;
+  for (const entry of manifest.modules ?? []) {
+    if (page.loaded.has(entry.url)) continue;
+    await loadSide(page.instance, new URL('./dyn/' + entry.url, page.baseUrl), page.wbg);
+    page.loaded.add(entry.url);
+    count++;
+  }
+  const t2 = performance.now();
+  if (count) page.instance.exports.__yawn_hot_refresh();
+  const t3 = performance.now();
+  globalThis.__yawn_timing = `manifest ${Math.round(t1 - t0)}ms, load ${Math.round(t2 - t1)}ms, mount ${Math.round(t3 - t2)}ms`;
+  return count;
+};
 
 globalThis.__yawn_sides = async (instance, baseUrl, imports) => {
   let wbg = null;
@@ -123,9 +156,11 @@ globalThis.__yawn_sides = async (instance, baseUrl, imports) => {
   } catch {
     return;
   }
+  page = { instance, baseUrl, wbg, loaded: new Set() };
   for (const entry of manifest.modules ?? []) {
     try {
       await loadSide(instance, new URL('./dyn/' + entry.url, baseUrl), wbg);
+      page.loaded.add(entry.url);
     } catch (e) {
       console.error('yawn: could not load', entry.url, e);
     }

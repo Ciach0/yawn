@@ -20,6 +20,8 @@ pub enum Act {
     Clear,
     /// The panel changed height
     Resize,
+    /// The terminal changed size: what was printed is printed again at the new width
+    Reflow,
     Open(String),
 }
 
@@ -36,7 +38,12 @@ pub struct App {
     pub reload: Option<ReloadHandle>,
     /// Log lines waiting to be printed above the panel
     pub pending: Vec<LogEvent>,
+    /// Log lines already printed, to print again when the terminal changes size
+    pub history: Vec<LogEvent>,
 }
+
+/// How many printed log events are kept for a reflow
+pub const HISTORY: usize = 5000;
 
 impl App {
     pub fn new(info: SessionInfo, level: Level) -> App {
@@ -50,6 +57,7 @@ impl App {
             rustc: None,
             reload: None,
             pending: Vec::new(),
+            history: Vec::new(),
         }
     }
 

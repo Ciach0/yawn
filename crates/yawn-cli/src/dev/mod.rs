@@ -4,6 +4,7 @@ pub mod dynamic;
 pub mod fetch;
 mod literals;
 pub mod loading;
+pub mod overlay;
 pub mod project;
 pub mod replay;
 pub mod rsx;
@@ -107,6 +108,7 @@ struct Dev {
     lanes: [Option<Arc<Mutex<replay::Lane>>>; 2],
     dynamic: Option<dynamic::Dynamic>,
     dropped_dynamic: bool,
+    warmed: bool,
     rev: u64,
     pending: ChangeSet,
     saves_seen: Arc<AtomicU64>,
@@ -119,6 +121,8 @@ struct Dev {
     bindgen: Option<wasm_bindgen::Tool>,
     literal_baseline: Option<literals::Snapshot>,
     literal_patch: bool,
+    /// The last build only made modules the open page can load
+    module_swap: bool,
     _watcher: Option<RecommendedWatcher>,
 }
 
@@ -152,6 +156,7 @@ impl Dev {
             lanes,
             dynamic,
             dropped_dynamic: false,
+            warmed: false,
             build_kill: Arc::new(KillGroup::default()),
             server_kill: Arc::new(KillGroup::default()),
             stop: Arc::new(AtomicBool::new(false)),
@@ -178,6 +183,7 @@ impl Dev {
             bindgen: None,
             literal_baseline: None,
             literal_patch: false,
+            module_swap: false,
             _watcher: None,
         }
     }
@@ -195,6 +201,7 @@ impl Dev {
     }
 
     fn run(&mut self) {
+        let _dev = yawn_rsx::project::DevMark::new(&self.project.root);
         // Shutdown: abort a running build and wake the loop
         {
             let (stop, kill, tx) = (self.stop.clone(), self.build_kill.clone(), self.tx.clone());
@@ -394,6 +401,7 @@ impl Dev {
 
     fn cycle(&mut self, mut cs: ChangeSet) {
         self.literal_patch = false;
+        self.module_swap = false;
         self.cycle_saves = self.saves_seen.load(Ordering::SeqCst);
         if !self.carry.is_empty() {
             cs.merge(std::mem::take(&mut self.carry));
@@ -534,7 +542,20 @@ impl Dev {
                         yawn::protocol::escape_line(&path.to_string_lossy())
                     ));
                 }
-                self.send_control(&format!("reload {rev}"));
+                if self.module_swap && !cs.asset {
+                    for href in &cs.css {
+                        self.send_control(&format!("css {rev} {href}"));
+                    }
+                    if self.project.dist.join("pkg/rsx.css").is_file() {
+                        self.send_control(&format!("css {rev} /pkg/rsx.css"));
+                    }
+                    if tailwind_changed {
+                        self.send_control(&format!("css {rev} {}", config::TAILWIND_URL));
+                    }
+                    self.send_control(&format!("module {rev}"));
+                } else {
+                    self.send_control(&format!("reload {rev}"));
+                }
             } else {
                 for href in &cs.css {
                     self.send_control(&format!("css {rev} {href}"));
@@ -640,13 +661,16 @@ impl Dev {
             }
         }
         self.server_rebuilt = need_server && !cs.server;
-        if (cs.initial || cs.server || cs.restart)
+        if (cs.initial || cs.restart || (cs.server && cs.client))
             && let Some(d) = self.dynamic.as_mut()
         {
             d.reset_exports();
         }
         let mut sided = false;
         let mut early: Option<CargoDone> = None;
+        let mut prebuilt: Option<
+            Vec<(Vec<cargo::Parsed>, Result<std::path::PathBuf, dynamic::SideError>)>,
+        > = None;
         if cs.client
             && rsx_ok
             && !patched
@@ -658,13 +682,71 @@ impl Dev {
             match d.plan() {
                 dynamic::Plan::Nothing => {}
                 dynamic::Plan::Full(why) => {
-                    self.log(Level::Debug, "client", format!("full build: {why}"))
+                    self.log(Level::Debug, "client", format!("full build: {why}"));
+                    d.reset_exports();
                 }
-                dynamic::Plan::Leaves(leaves) => {
+                dynamic::Plan::Leaves(mut leaves) => {
                     let t = Instant::now();
                     self.progress(0, 0, "side module", true);
                     let kill = self.build_kill.clone();
                     kill.clear();
+                    let signed: Vec<String> = leaves
+                        .iter()
+                        .filter(|l| l.sig)
+                        .map(|l| overlay::crate_name(&l.package))
+                        .collect();
+                    if !signed.is_empty() {
+                        d.overlay.add(signed.clone());
+                        d.native_overlay.add(signed);
+                    }
+                    let app = yawn_rsx::manifest::package_name(&self.project.root)
+                        .unwrap_or_else(|| "app".into());
+                    let prefix = overlay::prefix(&app);
+                    let names: Vec<String> =
+                        leaves.iter().map(|l| overlay::crate_name(&l.package)).collect();
+                    let overlay_wasm = d.overlay.active();
+                    let overlay_native = d.native_overlay.active();
+                    let lane_map = |lane: usize| {
+                        self.lanes[lane].as_ref().map(|l| {
+                            let mut l = l.lock().unwrap_or_else(|e| e.into_inner());
+                            overlay::collect(&prefix, &names, &mut |n| l.recorded(n))
+                        })
+                    };
+                    let mut missing: Vec<String> = Vec::new();
+                    let mut take = |found: Option<Result<_, Vec<String>>>| match found {
+                        Some(Ok(map)) => Some(map),
+                        Some(Err(m)) => {
+                            missing.extend(m);
+                            None
+                        }
+                        None => None,
+                    };
+                    let wasm_map = if overlay_wasm { take(lane_map(0)) } else { None };
+                    let native_map = if overlay_native { take(lane_map(1)) } else { None };
+                    if !missing.is_empty() {
+                        for leaf in d.crates() {
+                            if missing.contains(&overlay::crate_name(&leaf.package)) {
+                                let root = self
+                                    .project
+                                    .root
+                                    .join(yawn_rsx::split::CRATES_DIR)
+                                    .join(&leaf.dir)
+                                    .join("lib.rs");
+                                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&root) {
+                                    let _ = f.set_modified(std::time::SystemTime::now());
+                                }
+                            }
+                        }
+                    }
+                    if let Some(map) = wasm_map.as_ref().or(native_map.as_ref()) {
+                        let order = overlay::sorted(&prefix, map, &names);
+                        leaves.sort_by_key(|l| {
+                            order.iter().position(|n| *n == overlay::crate_name(&l.package))
+                        });
+                    }
+                    let nov = d.native_overlay.clone();
+                    let batch: std::sync::Mutex<Option<(String, Vec<(std::path::PathBuf, bool)>)>> =
+                        std::sync::Mutex::new(None);
                     let recs: Vec<Option<replay::Recorded>> = leaves
                         .iter()
                         .map(|leaf| {
@@ -677,10 +759,23 @@ impl Dev {
                     let dist = self.project.dist.clone();
                     let blocked = leaves.iter().any(|l| d.native_blocked(&l.dir));
                     let side = |d: &mut dynamic::Dynamic| {
+                        if overlay_wasm {
+                            let mut seen = Vec::new();
+                            let r = match &wasm_map {
+                                Some(map) => d.build_side_overlay(&leaves, map, &dist, &kill, &mut |p| {
+                                    seen.push(p.clone())
+                                }),
+                                None => Err(dynamic::SideError::Fallback(
+                                    "no recorded rustc commands for the overlay".into(),
+                                )),
+                            };
+                            return vec![(seen, r)];
+                        }
                         let mut out = Vec::new();
                         for (leaf, rec) in leaves.iter().zip(&recs) {
                             let mut seen = Vec::new();
                             let r = match rec {
+                                _ if leaf.server_only => Ok(()),
                                 Some(rec) => d.build_side(leaf, rec, &dist, &kill, &mut |p| {
                                     seen.push(p.clone())
                                 }),
@@ -709,6 +804,112 @@ impl Dev {
                         });
                         early = Some(done);
                         results
+                    } else if need_server && !cs.server && !leaves.is_empty() {
+                        let root = self.project.root.clone();
+                        let env = self.lanes[1]
+                            .as_ref()
+                            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).env())
+                            .unwrap_or_default();
+                        let dev_dir = self.project.dev_dir.clone();
+                        let recs: Vec<Option<replay::Recorded>> = leaves
+                            .iter()
+                            .map(|leaf| {
+                                let krate = leaf.package.replace('-', "_");
+                                self.lanes[1].as_ref().and_then(|l| {
+                                    l.lock().unwrap_or_else(|e| e.into_inner()).recorded(&krate)
+                                })
+                            })
+                            .collect();
+                        let jobs: Vec<(dynamic::Leaf, Vec<String>)> = leaves
+                            .iter()
+                            .map(|leaf| {
+                                let args = self.cargo_args(
+                                    &[
+                                        "build",
+                                        "-p",
+                                        leaf.package.as_str(),
+                                        "--lib",
+                                        "--config",
+                                        "profile.dev.opt-level=0",
+                                    ],
+                                    Some(SERVER_TARGET_DIR),
+                                );
+                                (leaf.clone(), args)
+                            })
+                            .collect();
+                        let (results, built) = std::thread::scope(|scope| {
+                            let job = scope.spawn(|| {
+                                let mut out = Vec::new();
+                                if overlay_native {
+                                    let mut seen = Vec::new();
+                                    let r = match &native_map {
+                                        Some(map) => dynamic::Dynamic::native_overlay_chain(
+                                            &dev_dir,
+                                            &nov,
+                                            &prefix,
+                                            map,
+                                            &leaves,
+                                            &kill,
+                                            &mut |p| seen.push(p.clone()),
+                                        ),
+                                        None => Err(dynamic::SideError::Fallback(
+                                            "no recorded rustc commands for the overlay".into(),
+                                        )),
+                                    };
+                                    match r {
+                                        Ok(list) => {
+                                            let parts: Vec<(std::path::PathBuf, bool)> =
+                                                list.iter().map(|(_, rlib, full)| (rlib.clone(), !full)).collect();
+                                            let key = list
+                                                .iter()
+                                                .filter(|(_, _, full)| *full)
+                                                .filter_map(|(name, _, _)| {
+                                                    leaves.iter().find(|l| overlay::crate_name(&l.package) == *name)
+                                                })
+                                                .map(|l| l.dir.clone())
+                                                .collect::<Vec<_>>()
+                                                .join("+");
+                                            *batch.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, parts));
+                                            out.push((seen, Ok(std::path::PathBuf::new())));
+                                        }
+                                        Err(e) => out.push((seen, Err(e))),
+                                    }
+                                    return out;
+                                }
+                                for ((leaf, args), rec) in jobs.iter().zip(&recs) {
+                                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                                    let mut seen = Vec::new();
+                                    let r = match rec {
+                                        Some(rec) => dynamic::Dynamic::native_rustc(
+                                            &dev_dir,
+                                            "native-tmp",
+                                            leaf,
+                                            rec,
+                                            &kill,
+                                            &mut |p| seen.push(p.clone()),
+                                        ),
+                                        None => dynamic::Dynamic::native_cargo(
+                                            &root,
+                                            leaf,
+                                            &args,
+                                            &env,
+                                            &kill,
+                                            &mut |p| seen.push(p.clone()),
+                                        ),
+                                    };
+                                    let stop = r.is_err();
+                                    out.push((seen, r));
+                                    if stop {
+                                        break;
+                                    }
+                                }
+                                out
+                            });
+                            let results = side(&mut d);
+                            (results, job.join().unwrap_or_default())
+                        });
+                        prebuilt = Some(built);
+                        results
                     } else {
                         side(&mut d)
                     };
@@ -726,6 +927,7 @@ impl Dev {
                             }
                             Err(dynamic::SideError::Fallback(why)) => {
                                 self.log(Level::Debug, "client", format!("full build: {why}"));
+                                d.reset_exports();
                                 all = false;
                             }
                         }
@@ -736,32 +938,54 @@ impl Dev {
                         if need_server && !cs.server && !blocked {
                             let t = Instant::now();
                             let mut done = true;
+                            let mut batch_done = false;
                             for leaf in &leaves {
-                                let args = self.cargo_args(
-                                    &[
-                                        "build",
-                                        "-p",
-                                        leaf.package.as_str(),
-                                        "--lib",
-                                        "--config",
-                                        "profile.dev.opt-level=0",
-                                    ],
-                                    Some(SERVER_TARGET_DIR),
-                                );
-                                let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                                let env = self.lanes[1]
-                                    .as_ref()
-                                    .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).env())
-                                    .unwrap_or_default();
-                                let mut seen = Vec::new();
-                                let r = d.build_native(
-                                    leaf,
-                                    &args,
-                                    &env,
-                                    &self.project.dev_dir,
-                                    &kill,
-                                    &mut |p| seen.push(p.clone()),
-                                );
+                                if batch_done {
+                                    break;
+                                }
+                                let ready = prebuilt.as_mut().filter(|p| !p.is_empty()).map(|p| p.remove(0));
+                                let (seen, r) = match ready {
+                                    Some((seen, Ok(rlib))) => {
+                                        let taken = batch.lock().unwrap_or_else(|e| e.into_inner()).take();
+                                        let r = match taken {
+                                            Some((key, parts)) => {
+                                                batch_done = true;
+                                                d.link_native_parts(&key, &parts, &self.project.dev_dir)
+                                            }
+                                            None => d.link_native(leaf, &rlib, &self.project.dev_dir),
+                                        };
+                                        (seen, r)
+                                    }
+                                    Some((seen, Err(e))) => (seen, Err(e)),
+                                    None => {
+                                        let args = self.cargo_args(
+                                            &[
+                                                "build",
+                                                "-p",
+                                                leaf.package.as_str(),
+                                                "--lib",
+                                                "--config",
+                                                "profile.dev.opt-level=0",
+                                            ],
+                                            Some(SERVER_TARGET_DIR),
+                                        );
+                                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                                        let env = self.lanes[1]
+                                            .as_ref()
+                                            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).env())
+                                            .unwrap_or_default();
+                                        let mut seen = Vec::new();
+                                        let r = d.build_native(
+                                            leaf,
+                                            &args,
+                                            &env,
+                                            &self.project.dev_dir,
+                                            &kill,
+                                            &mut |p| seen.push(p.clone()),
+                                        );
+                                        (seen, r)
+                                    }
+                                };
                                 for p in &seen {
                                     self.report(p, errors, &mut counts, "server");
                                 }
@@ -807,6 +1031,7 @@ impl Dev {
             }
             self.dynamic = Some(d);
         }
+        self.module_swap = sided;
         let client = cs.client && rsx_ok && !patched && !sided;
         let server = need_server && !self.stopping();
         if client || server {
@@ -874,6 +1099,23 @@ impl Dev {
         });
         // the browser's progress bar is over
         self.send_control(&format!("progress {} 0 0 ", self.rev));
+        if ok && !self.warmed && self.dynamic.is_some() && std::env::var_os("YAWN_NO_WARM").is_none() {
+            self.warmed = true;
+            let leaves = self.dynamic.as_ref().map(|d| d.crates()).unwrap_or_default();
+            let mut jobs: Vec<(dynamic::Leaf, replay::Recorded, bool)> = Vec::new();
+            for leaf in leaves {
+                let krate = leaf.package.replace('-', "_");
+                for (lane, native) in [(0, false), (1, true)] {
+                    let rec = self.lanes[lane]
+                        .as_ref()
+                        .and_then(|l| l.lock().unwrap_or_else(|e| e.into_inner()).recorded(&krate));
+                    if let Some(rec) = rec {
+                        jobs.push((leaf.clone(), rec, native));
+                    }
+                }
+            }
+            dynamic::warm(self.project.dev_dir.clone(), jobs);
+        }
         if ok {
             self.log(
                 Level::Info,
@@ -885,6 +1127,7 @@ impl Dev {
     }
 
     fn compile_rsx(&mut self, errors: &mut Vec<String>, counts: &mut (u32, u32)) -> bool {
+        yawn_rsx::project::DevMark::refresh(&self.project.root);
         match rsx::compile(&self.project.root) {
             Ok(report) => {
                 if report.written > 0 {
@@ -1512,6 +1755,7 @@ impl Dev {
                     let mut it = arg.split_whitespace();
                     let rev: Option<u64> = it.next().and_then(|r| r.parse().ok());
                     let kind = it.next().unwrap_or("reload");
+                    let detail = it.collect::<Vec<_>>().join(" ");
                     if kind == "css" && self.literal_patch {
                         return;
                     }
@@ -1521,12 +1765,17 @@ impl Dev {
                             "css" => "styles updated",
                             "patch" => "view updated",
                             "client" => "client replaced",
+                            "module" => "modules swapped",
                             _ => "page reloaded",
                         };
                         self.log(
                             Level::Info,
                             "browser",
-                            format!("{what} {} after save", fmt_duration(ms)),
+                            if detail.is_empty() {
+                                format!("{what} {} after save", fmt_duration(ms))
+                            } else {
+                                format!("{what} {} after save ({detail})", fmt_duration(ms))
+                            },
                         );
                         self.sink.info("refresh", fmt_duration(ms));
                     }
