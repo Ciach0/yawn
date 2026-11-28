@@ -166,6 +166,13 @@ call and never fails. The server binary routes every server function of the proj
   cached like any `GET`, and the call carries an `x-yawn-fn` header. A `GET` must not change
   anything.
 - `#[post]`, `#[put]`, `#[patch]` and `#[delete]` send the arguments as a JSON tuple in the body.
+- Extractors: `#[post(headers: HeaderMap, session: Session)]` names what the body takes from the
+  request, any axum `FromRequestParts<()>` type. They are bound as variables in the body and are
+  not arguments of the function, so the caller (and the client's version) doesn't see them. Their
+  types appear only in the server's version of the function, so write them as full paths
+  (`yawn::server::axum::http::HeaderMap`) or import them behind
+  `#[cfg(not(target_arch = "wasm32"))]`. A call that didn't come over HTTP has no request and gets
+  an error from the extractor.
 - `#[head]` and `#[options]` are refused: a HEAD answer has no body to return, and OPTIONS is the
   browser's own preflight request.
 

@@ -41,11 +41,11 @@ pub fn parse(src: &str) -> Result<File> {
                 continue;
             }
             Kind::Punct if depth == 0 && &src[i..end] == "#" => {
-                if let Some((method, after_fn)) = method_attr(src, end)? {
+                if let Some((method, extractors, after_fn)) = method_attr(src, end)? {
                     if i > rust_from {
                         items.push(Item::Rust(rust_from..i));
                     }
-                    let (f, next) = parse_server_fn(src, after_fn, method)?;
+                    let (f, next) = parse_server_fn(src, after_fn, method, extractors)?;
                     items.push(Item::ServerFn(f));
                     rust_from = next;
                     i = next;
@@ -147,14 +147,17 @@ fn is_component_start(src: &str, after_kw: usize) -> bool {
         && rest.trim_start().starts_with(|c: char| c.is_uppercase())
 }
 
-/// After a `#`: when it opens `#[get]`, `#[post]`... the method and the end of the `fn` the attribute
-/// belongs to (`pub` and `async` may stand between them). Any other attribute is plain Rust.
-fn method_attr(src: &str, after_hash: usize) -> Result<Option<(Method, usize)>> {
+/// After a `#`: when it opens `#[get]`, `#[post(headers: HeaderMap)]`... the method, the extractors
+/// in the parentheses and the end of the `fn` the attribute belongs to (`pub` and `async` may stand
+/// between them). Any other attribute is plain Rust.
+fn method_attr(src: &str, after_hash: usize) -> Result<Option<(Method, Vec<Param>, usize)>> {
     if !src[after_hash..].starts_with('[') {
         return Ok(None);
     }
     let close = scan::find_close(src, after_hash, src.len())?;
-    let name = src[after_hash + 1..close].trim();
+    let inner = &src[after_hash + 1..close];
+    let paren = inner.find('(').map(|p| after_hash + 1 + p);
+    let name = inner[..paren.map_or(inner.len(), |p| p - after_hash - 1)].trim();
     let attr = after_hash - 1..close + 1;
     if matches!(name, "head" | "options") {
         return Err(Diagnostic::new(format!("`#[{name}]` cannot make a server function"), attr)
@@ -165,6 +168,21 @@ fn method_attr(src: &str, after_hash: usize) -> Result<Option<(Method, usize)>> 
             }));
     }
     let Some(method) = Method::from_attr(name) else { return Ok(None) };
+    let mut extractors = Vec::new();
+    if let Some(open) = paren {
+        let shut = scan::find_close(src, open, close)?;
+        if !src[shut + 1..close].trim().is_empty() {
+            return Err(Diagnostic::new(
+                format!("`#[{name}(...)]` ends after the extractors"),
+                attr,
+            ));
+        }
+        extractors = parse_params(src, open + 1, shut)?;
+        if let Some(p) = extractors.iter().find(|p| p.default.is_some()) {
+            return Err(Diagnostic::new("an extractor has no default", p.span.clone())
+                .help("write `name: Type`, the type of an axum extractor"));
+        }
+    }
     let mut at = close + 1;
     loop {
         at = scan::skip_trivia(src, at, src.len())?;
@@ -177,7 +195,7 @@ fn method_attr(src: &str, after_hash: usize) -> Result<Option<(Method, usize)>> 
         }
         match &src[at..end] {
             "pub" | "async" => at = end,
-            "fn" => return Ok(Some((method, end))),
+            "fn" => return Ok(Some((method, extractors, end))),
             _ => break,
         }
     }
@@ -185,7 +203,12 @@ fn method_attr(src: &str, after_hash: usize) -> Result<Option<(Method, usize)>> 
         .help("a server function looks like `#[post] fn name(arg: Type) -> Type { body }`"))
 }
 
-fn parse_server_fn(src: &str, after_fn: usize, method: Method) -> Result<(ServerFn, usize)> {
+fn parse_server_fn(
+    src: &str,
+    after_fn: usize,
+    method: Method,
+    extractors: Vec<Param>,
+) -> Result<(ServerFn, usize)> {
     let shape = "a server function looks like `#[post] fn name(arg: Type) -> Type { body }`";
     let at = scan::skip_trivia(src, after_fn, src.len())?;
     let (kind, name_end) = if at < src.len() { scan::token(src, at)? } else { (Kind::Space, at) };
@@ -250,7 +273,15 @@ fn parse_server_fn(src: &str, after_fn: usize, method: Method) -> Result<(Server
     let body_close = scan::find_close(src, body_open, src.len())?;
     validate_block(src, body_open + 1..body_close)?;
     Ok((
-        ServerFn { method, name, name_span, params, ret, body: body_open..body_close + 1 },
+        ServerFn {
+            method,
+            extractors,
+            name,
+            name_span,
+            params,
+            ret,
+            body: body_open..body_close + 1,
+        },
         body_close + 1,
     ))
 }

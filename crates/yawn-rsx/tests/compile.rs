@@ -509,3 +509,17 @@ fn server_fn_errors() {
     assert!(d.message.contains("goes before a function"), "{}", d.message);
     assert_eq!(pointed(src, &d), "#[get]");
 }
+
+#[test]
+fn server_fn_extractors_exist_on_the_server_only() {
+    let rust = ok(
+        "#[post(headers: axum::http::HeaderMap, who: Who)]\nasync fn add(n: u8) -> u8 {\n    n\n}\n",
+    );
+    assert!(rust.contains("pub async fn add(n: u8) -> ::core::result::Result<u8, ::yawn::fns::Error> { let headers = match ::yawn::fns::extract::<axum::http::HeaderMap>().await { ::core::result::Result::Ok(v) => v, ::core::result::Result::Err(e) => return ::core::result::Result::Err(e) }; let who = match ::yawn::fns::extract::<Who>().await {"), "{rust}");
+    assert!(rust.contains("pub async fn add(n: u8) -> ::core::result::Result<u8, ::yawn::fns::Error> { ::yawn::fns::call("), "{rust}");
+    let src = "#[post(a: u8 = 1)] fn f() {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("no default"), "{}", d.message);
+    let (d, _) = err("#[get(a: u8) x] fn f() {}");
+    assert!(d.message.contains("ends after the extractors"), "{}", d.message);
+}

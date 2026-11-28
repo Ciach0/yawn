@@ -23,6 +23,12 @@ fn describe(words: Vec<String>, sep: char) -> Result<String, String> {
     Ok(out)
 }
 
+/// How many headers the call came with
+#[get(headers: yawn::server::axum::http::HeaderMap)]
+fn header_count() -> usize {
+    headers.len()
+}
+
 component Adder() {
     let total = signal(0);
 

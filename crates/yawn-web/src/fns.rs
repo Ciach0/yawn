@@ -145,14 +145,45 @@ pub async fn call<A: serde::Serialize, T: serde::de::DeserializeOwned>(
 }
 
 #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
-pub use serve::{Handler, handler};
+pub use serve::{Handler, extract, handler, with_request};
 
 #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
 mod serve {
     use super::{CALL_HEADER, Error, Method, decode_args};
     use axum::body::Bytes;
-    use axum::http::{HeaderMap, StatusCode, Uri, header};
+    use axum::extract::{FromRequestParts, Request};
+    use axum::http::request::Parts;
+    use axum::http::{HeaderMap, StatusCode, header};
     use axum::response::{IntoResponse, Response};
+    use std::sync::Arc;
+
+    /// Runs `f` as if `parts` were the request being answered
+    #[doc(hidden)]
+    pub async fn with_request<F: Future>(parts: Parts, f: F) -> F::Output {
+        REQUEST.scope(Arc::new(tokio::sync::Mutex::new(parts)), f).await
+    }
+
+    /// The most a call may send, as axum's own body limit
+    const BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+    tokio::task_local! {
+        /// The request a server function is answering, for [`extract`]
+        static REQUEST: Arc<tokio::sync::Mutex<Parts>>;
+    }
+
+    /// An extractor of the request that called the server function (`#[post(session: Session)]`):
+    /// `headers`, `Extension`s, anything axum can take from a request's parts. A call that did not
+    /// come over HTTP has no request, and fails.
+    #[doc(hidden)]
+    pub async fn extract<T: FromRequestParts<()>>() -> Result<T, Error> {
+        let Ok(parts) = REQUEST.try_with(Arc::clone) else {
+            return Err(Error::Status(500, "this call has no request to read".into()));
+        };
+        let mut parts = parts.lock().await;
+        T::from_request_parts(&mut parts, &()).await.map_err(|rejection| {
+            Error::Status(rejection.into_response().status().as_u16(), "request refused".into())
+        })
+    }
 
     /// A server function as the router calls it, `Args` being the tuple of its argument types
     #[doc(hidden)]
@@ -164,6 +195,10 @@ mod serve {
         match out.map(|v| serde_json::to_vec(&v)) {
             Ok(Ok(json)) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
             Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(Error::Status(code, message)) => {
+                (StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), message)
+                    .into_response()
+            }
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         }
     }
@@ -236,9 +271,20 @@ mod serve {
     pub fn handler<A: 'static, F: Handler<A>>(method: Method, f: F) -> axum::routing::MethodRouter {
         macro_rules! route {
             ($verb:ident) => {
-                axum::routing::$verb(move |headers: HeaderMap, uri: Uri, body: Bytes| {
+                axum::routing::$verb(move |request: Request| {
                     let f = f.clone();
-                    async move { serve(method, f, &headers, uri.query(), body).await }
+                    async move {
+                        let (parts, body) = request.into_parts();
+                        let Ok(body) = axum::body::to_bytes(body, BODY_LIMIT).await else {
+                            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+                        };
+                        let (headers, query) =
+                            (parts.headers.clone(), parts.uri.query().map(str::to_owned));
+                        let parts = Arc::new(tokio::sync::Mutex::new(parts));
+                        REQUEST
+                            .scope(parts, serve(method, f, &headers, query.as_deref(), body))
+                            .await
+                    }
                 })
             };
         }
@@ -372,5 +418,25 @@ mod tests {
             .route("/put", handler(Method::Put, declared::ping))
             .route("/patch", handler(Method::Patch, declared::ping))
             .route("/delete", handler(Method::Delete, declared::ping));
+    }
+
+    #[cfg(all(feature = "server", not(target_arch = "wasm32")))]
+    #[test]
+    fn extractors_read_the_request_being_answered() {
+        use axum::http::{HeaderMap, Request};
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let (parts, ()) =
+                Request::builder().header("x-user", "bob").body(()).unwrap().into_parts();
+            let seen = with_request(parts, async {
+                let headers = extract::<HeaderMap>().await.unwrap();
+                let again = extract::<HeaderMap>().await.unwrap();
+                (headers.get("x-user").map(|v| v.as_bytes().to_vec()), again.len())
+            })
+            .await;
+            assert_eq!(seen, (Some(b"bob".to_vec()), 1));
+            let alone = extract::<HeaderMap>().await;
+            assert!(matches!(alone, Err(Error::Status(500, _))), "{alone:?}");
+        });
     }
 }

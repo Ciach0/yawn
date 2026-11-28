@@ -172,6 +172,12 @@ impl Gen<'_> {
             }
             w.raw(", ::yawn::fns::Error> {");
             if server {
+                // taken from the request before the body runs: the body's own `?` is not ours
+                for e in &f.extractors {
+                    w.raw(&format!(" let {} = match ::yawn::fns::extract::<", e.name));
+                    w.verbatim(&e.ty);
+                    w.raw(">().await { ::core::result::Result::Ok(v) => v, ::core::result::Result::Err(e) => return ::core::result::Result::Err(e) };");
+                }
                 w.raw(" ::core::result::Result::Ok(async move ");
                 w.verbatim(&f.body);
                 w.raw(".await) }");

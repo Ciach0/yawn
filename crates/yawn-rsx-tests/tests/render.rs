@@ -365,7 +365,15 @@ fn server_fns_run_the_body_on_the_server() {
     assert_eq!(now(server_fns::ping()), Ok(()));
     assert_eq!(now(server_fns::describe(vec![], ',')), Ok(Err("no words".into())));
     assert_eq!(now(server_fns::describe(vec!["a".into(), "b".into()], ';')), Ok(Ok("a;b;".into())));
-    // axum checks the routes as they are added: three distinct paths
+    let (parts, ()) = yawn::server::axum::http::Request::builder()
+        .header("a", "1")
+        .header("b", "2")
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert_eq!(now(yawn::fns::with_request(parts, server_fns::header_count())), Ok(2));
+    assert!(matches!(now(server_fns::header_count()), Err(yawn::fns::Error::Status(500, _))));
+    // axum checks the routes as they are added: distinct paths
     let _ = server_fns::__yawn_server_fns(yawn::server::axum::Router::new());
     let app = mount(server_fns::Adder::default());
     assert_eq!(text(&app, "button"), "0");

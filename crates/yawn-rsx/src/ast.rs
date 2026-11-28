@@ -54,6 +54,9 @@ impl Method {
 #[derive(Debug, Clone)]
 pub struct ServerFn {
     pub method: Method,
+    /// `name: Type` pairs of `#[post(name: Type)]`: taken from the request on the server, not passed by
+    /// the caller
+    pub extractors: Vec<Param>,
     pub name: String,
     pub name_span: Span,
     pub params: Vec<Param>,
