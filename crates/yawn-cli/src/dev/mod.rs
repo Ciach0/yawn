@@ -730,6 +730,11 @@ impl Dev {
                     };
                     let wasm_map = if overlay_wasm { take(lane_map(0)) } else { None };
                     let native_map = if overlay_native { take(lane_map(1)) } else { None };
+                    let missing_note = if missing.is_empty() {
+                        "the lane of the app has no recorded commands".to_string()
+                    } else {
+                        format!("no recorded rustc command for {}", missing.join(", "))
+                    };
                     if !missing.is_empty() {
                         for leaf in d.crates() {
                             if missing.contains(&overlay::crate_name(&leaf.package)) {
@@ -774,9 +779,7 @@ impl Dev {
                                         seen.push(p.clone())
                                     })
                                 }
-                                None => Err(dynamic::SideError::Fallback(
-                                    "no recorded rustc commands for the overlay".into(),
-                                )),
+                                None => Err(dynamic::SideError::Fallback(missing_note.clone())),
                             };
                             return vec![(seen, r)];
                         }
@@ -862,7 +865,7 @@ impl Dev {
                                             &mut |p| seen.push(p.clone()),
                                         ),
                                         None => Err(dynamic::SideError::Fallback(
-                                            "no recorded rustc commands for the overlay".into(),
+                                            format!("server: {missing_note}"),
                                         )),
                                     };
                                     match r {

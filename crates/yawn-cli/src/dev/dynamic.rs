@@ -1233,7 +1233,9 @@ impl Dynamic {
         )
         .replace('-', "_");
         wanted.extend(self.learned.iter().cloned());
-        let runtime = self.runtime_symbols(out_dir_of);
+        let project: Vec<String> =
+            self.crates().iter().map(|l| l.package.replace('-', "_")).collect();
+        let runtime = self.runtime_symbols(out_dir_of, &project);
         wanted.extend(runtime.iter().cloned());
         wanted.extend(self.failure_symbols());
         wanted.retain(|n| !n.contains(&routes));
@@ -1292,13 +1294,18 @@ impl Dynamic {
     fn runtime_symbols(
         &mut self,
         out_dir_of: &mut dyn FnMut(&str) -> Option<PathBuf>,
+        project: &[String],
     ) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         if self.runtime_off || std::env::var_os("YAWN_NO_RUNTIME_EXPORTS").is_some() {
             return out;
         }
         out.extend(self.std_symbols());
-        for krate in ["yawn_web", "yawn_kit", "yawn_reactivity", "yawn_router"] {
+        let yawn = ["yawn_web", "yawn_kit", "yawn_reactivity", "yawn_router"];
+        // the crates of the project too: a generic function a crate of it instantiated (the first
+        // `signal("1")` of a text) is shared with the ones above it, which then import it from the
+        // app, where nothing calls it as long as no code of the app uses that instantiation
+        for krate in yawn.iter().copied().chain(project.iter().map(String::as_str)) {
             let Some(dir) = out_dir_of(krate) else { continue };
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
             let prefix = format!("lib{krate}-");
