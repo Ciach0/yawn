@@ -451,12 +451,12 @@ fn server_fn_has_a_server_and_a_client_version() {
     let src = "use x::Y;\n/// docs\n#[post]\npub async fn add(mut a: i32, b: Vec<(u8, u8)>) -> Option<Y> {\n    a += 1;\n    None\n}\n#[get]\nfn ping() {}\n#[derive(Debug)]\nstruct S;\n";
     let rust = ok(src);
     assert!(rust.contains("/// docs\n#[cfg(not(target_arch = \"wasm32\"))]\n#[allow(clippy::unit_arg)]\npub async fn add(mut a: i32, b: Vec<(u8, u8)>) -> ::core::result::Result<Option<Y>, ::yawn::fns::Error> { ::core::result::Result::Ok(async move {\n    a += 1;"), "{rust}");
-    assert!(rust.contains("pub async fn add(a: i32, b: Vec<(u8, u8)>) -> ::core::result::Result<Option<Y>, ::yawn::fns::Error> { ::yawn::fns::call(::yawn::fns::Method::Post, ::core::module_path!(), \"add\", &(a, b, )).await }"), "{rust}");
+    assert!(rust.contains("pub async fn add(a: i32, b: Vec<(u8, u8)>) -> ::core::result::Result<Option<Y>, ::yawn::fns::Error> { ::yawn::fns::call::<::yawn::fns::codec::Bits, _, _>(::yawn::fns::Method::Post, ::core::module_path!(), \"add\", &(a, b, )).await }"), "{rust}");
     assert!(
         rust.contains("pub async fn ping() -> ::core::result::Result<(), ::yawn::fns::Error>"),
         "{rust}"
     );
-    assert!(rust.contains(".route(&::yawn::fns::url(::core::module_path!(), \"ping\"), ::yawn::fns::handler(::yawn::fns::Method::Get, ping))"), "{rust}");
+    assert!(rust.contains("let r = ::yawn::fns::route::<::yawn::fns::codec::Bits, _, _>(r, &::yawn::fns::url(::core::module_path!(), \"ping\"), ::yawn::fns::Method::Get, ping);"), "{rust}");
     assert!(
         rust.contains("#[derive(Debug)]\nstruct S;"),
         "any other attribute is plain Rust\n{rust}"
@@ -516,10 +516,48 @@ fn server_fn_extractors_exist_on_the_server_only() {
         "#[post(headers: axum::http::HeaderMap, who: Who)]\nasync fn add(n: u8) -> u8 {\n    n\n}\n",
     );
     assert!(rust.contains("pub async fn add(n: u8) -> ::core::result::Result<u8, ::yawn::fns::Error> { let headers = match ::yawn::fns::extract::<axum::http::HeaderMap>().await { ::core::result::Result::Ok(v) => v, ::core::result::Result::Err(e) => return ::core::result::Result::Err(e) }; let who = match ::yawn::fns::extract::<Who>().await {"), "{rust}");
-    assert!(rust.contains("pub async fn add(n: u8) -> ::core::result::Result<u8, ::yawn::fns::Error> { ::yawn::fns::call("), "{rust}");
+    assert!(rust.contains("pub async fn add(n: u8) -> ::core::result::Result<u8, ::yawn::fns::Error> { ::yawn::fns::call::<"), "{rust}");
     let src = "#[post(a: u8 = 1)] fn f() {}";
     let (d, _) = err(src);
     assert!(d.message.contains("no default"), "{}", d.message);
     let (d, _) = err("#[get(a: u8) x] fn f() {}");
-    assert!(d.message.contains("ends after the extractors"), "{}", d.message);
+    assert!(d.message.contains("ends after the options and extractors"), "{}", d.message);
+}
+
+#[test]
+fn server_fn_encoding_is_an_option_of_the_attribute() {
+    for (name, marker) in
+        [("bits", "Bits"), ("json", "Json"), ("postcard", "Postcard"), ("dynamic", "Dynamic")]
+    {
+        let rust =
+            ok(&format!("#[post(encoding = {name})]\nasync fn f(n: u8) -> u8 {{\n    n\n}}\n"));
+        assert!(
+            rust.contains(&format!("::yawn::fns::call::<::yawn::fns::codec::{marker}, _, _>")),
+            "{rust}"
+        );
+        assert!(
+            rust.contains(&format!("::yawn::fns::route::<::yawn::fns::codec::{marker}, _, _>")),
+            "{rust}"
+        );
+    }
+    let rust =
+        ok("#[get(encoding = json, headers: axum::http::HeaderMap)]\nasync fn f() -> u8 { 1 }\n");
+    assert!(
+        rust.contains("codec::Json") && rust.contains("extract::<axum::http::HeaderMap>"),
+        "{rust}"
+    );
+    let rust = ok(
+        "#[get(headers: axum::http::HeaderMap, encoding = dynamic)]\nasync fn f() -> u8 { 1 }\n",
+    );
+    assert!(
+        rust.contains("codec::Dynamic") && rust.contains("extract::<axum::http::HeaderMap>"),
+        "{rust}"
+    );
+    let src = "#[post(encoding = xml)] fn f() {}";
+    let (d, _) = err(src);
+    assert!(d.message.contains("not an encoding"), "{}", d.message);
+    let (d, _) = err("#[post(speed = fast)] fn f() {}");
+    assert!(d.message.contains("not an option"), "{}", d.message);
+    let (d, _) = err("#[post(encoding = json, encoding = bits)] fn f() {}");
+    assert!(d.message.contains("given twice"), "{}", d.message);
 }

@@ -144,7 +144,9 @@ fn server_root(root: &Path, fn_modules: &[Vec<String>]) -> String {
             let path: String = m.iter().map(|p| format!("::{p}")).collect();
             fns.push_str(&format!("let fns = yawn_app{path}::__yawn_server_fns(fns);\n    "));
         }
-        fns.push_str("let app = app.merge(fns);\n    ");
+        fns.push_str(
+            "let fns = ::yawn::fns::batch_route(fns);\n    let app = app.merge(fns);\n    ",
+        );
     }
     let configure = if server_file(root).is_some() {
         "let app = yawn_app::server::configure(app);\n    "

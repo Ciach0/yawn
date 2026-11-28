@@ -14,6 +14,7 @@
 //! WASM) is the client. `yawn dev` builds and supervises both.
 
 #![allow(clippy::type_complexity)]
+pub use yawn_bits as bits;
 pub use yawn_reactivity as reactivity;
 
 #[cfg(all(feature = "config", not(target_arch = "wasm32")))]

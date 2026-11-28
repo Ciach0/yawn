@@ -17,10 +17,14 @@ default = ["server"]
 json = ["dep:serde", "dep:serde_json"]
 config = ["dep:serde", "dep:toml"]
 http = ["dep:serde", "dep:serde_json", "dep:form_urlencoded", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:hyper-rustls", "dep:rustls", "dep:webpki-roots", "dep:tokio"]
+postcard = ["dep:postcard", "dep:serde"]
+dynamic = ["dep:serde", "yawn-bits/serde"]
 server = ["config", "dep:serde", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tokio-stream", "dep:tower-http", "dep:serde_json", "dep:libc", "dep:sha2"]
 
 [dependencies]
 yawn-reactivity.workspace = true
+yawn-bits.workspace = true
+postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
 serde_json = { version = "1", optional = true }
@@ -45,3 +49,6 @@ libc = { version = "0.2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "=0.2.129", features = ["enable-interning"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

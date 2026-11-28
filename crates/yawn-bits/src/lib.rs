@@ -24,6 +24,9 @@
 mod impls;
 pub mod schema;
 
+#[cfg(feature = "serde")]
+pub mod dynamic;
+
 pub use yawn_bits_derive::Bits;
 
 use std::fmt;

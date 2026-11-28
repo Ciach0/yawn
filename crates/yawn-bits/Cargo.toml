@@ -11,3 +11,7 @@ rust-version.workspace = true
 
 [dependencies]
 yawn-bits-derive = { path = "../yawn-bits-derive", version = "0.1.0" }
+serde = { version = "1", optional = true }
+
+[features]
+serde = ["dep:serde"]

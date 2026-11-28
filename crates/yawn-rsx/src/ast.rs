@@ -50,10 +50,48 @@ impl Method {
     }
 }
 
+/// How a server function's arguments and answer are written on the wire, from
+/// `#[post(encoding = json)]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Encoding {
+    /// `yawn::bits`: positional, small, bounded; the types derive `Bits`
+    #[default]
+    Bits,
+    /// `serde` types as JSON
+    Json,
+    /// `serde` types as postcard
+    Postcard,
+    /// `serde` types in a self-describing binary format
+    Dynamic,
+}
+
+impl Encoding {
+    pub fn from_name(name: &str) -> Option<Encoding> {
+        Some(match name {
+            "bits" => Encoding::Bits,
+            "json" => Encoding::Json,
+            "postcard" => Encoding::Postcard,
+            "dynamic" => Encoding::Dynamic,
+            _ => return None,
+        })
+    }
+
+    /// The marker type in `yawn::fns::codec` the generated code names
+    pub fn marker(self) -> &'static str {
+        match self {
+            Encoding::Bits => "Bits",
+            Encoding::Json => "Json",
+            Encoding::Postcard => "Postcard",
+            Encoding::Dynamic => "Dynamic",
+        }
+    }
+}
+
 /// `#[post] fn name(params) -> Type { body }`: runs on the server, the client calls it over HTTP
 #[derive(Debug, Clone)]
 pub struct ServerFn {
     pub method: Method,
+    pub encoding: Encoding,
     /// `name: Type` pairs of `#[post(name: Type)]`: taken from the request on the server, not passed by
     /// the caller
     pub extractors: Vec<Param>,

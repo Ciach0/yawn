@@ -184,7 +184,8 @@ impl Gen<'_> {
             } else {
                 let args: String = f.params.iter().map(|p| format!("{}, ", p.name)).collect();
                 w.raw(&format!(
-                    " ::yawn::fns::call(::yawn::fns::Method::{}, ::core::module_path!(), \"{}\", &({args})).await }}",
+                    " ::yawn::fns::call::<::yawn::fns::codec::{}, _, _>(::yawn::fns::Method::{}, ::core::module_path!(), \"{}\", &({args})).await }}",
+                    f.encoding.marker(),
                     f.method.variant(),
                     f.name
                 ));
@@ -196,25 +197,30 @@ impl Gen<'_> {
     /// `__yawn_server_fns`, which adds the file's server functions to the server's routes. The
     /// client's call builds the same URL from the same `module_path!()`.
     fn server_routes(&mut self, file: &File) {
-        let names: Vec<(&str, Method)> = file
+        let names: Vec<(&str, Method, Encoding)> = file
             .items
             .iter()
             .filter_map(|i| {
-                if let Item::ServerFn(f) = i { Some((f.name.as_str(), f.method)) } else { None }
+                if let Item::ServerFn(f) = i {
+                    Some((f.name.as_str(), f.method, f.encoding))
+                } else {
+                    None
+                }
             })
             .collect();
         if names.is_empty() {
             return;
         }
         let w = &mut self.w;
-        w.raw("\n#[cfg(not(target_arch = \"wasm32\"))]\n#[doc(hidden)]\npub fn __yawn_server_fns(r: ::yawn::server::axum::Router) -> ::yawn::server::axum::Router {\n    r");
-        for (name, method) in names {
+        w.raw("\n#[cfg(not(target_arch = \"wasm32\"))]\n#[doc(hidden)]\npub fn __yawn_server_fns(r: ::yawn::server::axum::Router) -> ::yawn::server::axum::Router {");
+        for (name, method, encoding) in names {
             w.raw(&format!(
-                "\n        .route(&::yawn::fns::url(::core::module_path!(), \"{name}\"), ::yawn::fns::handler(::yawn::fns::Method::{}, {name}))",
+                "\n    let r = ::yawn::fns::route::<::yawn::fns::codec::{}, _, _>(r, &::yawn::fns::url(::core::module_path!(), \"{name}\"), ::yawn::fns::Method::{}, {name});",
+                encoding.marker(),
                 method.variant()
             ));
         }
-        w.raw("\n}");
+        w.raw("\n    r\n}");
     }
 
     fn fresh(&mut self, prefix: &str) -> String {

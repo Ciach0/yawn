@@ -162,10 +162,9 @@ Result<usize, yawn::fns::Error>`: the server's runs the body, the client's sends
 call and never fails. The server binary routes every server function of the project. `pub` and
 `async` may stand before `fn`; the function is public either way.
 
-- `#[get]` is for reads: the arguments go in the URL as `?args=` (a JSON tuple), the answer can be
-  cached like any `GET`, and the call carries an `x-yawn-fn` header. A `GET` must not change
-  anything.
-- `#[post]`, `#[put]`, `#[patch]` and `#[delete]` send the arguments as a JSON tuple in the body.
+- `#[get]` is for reads: the arguments go in the URL as `?args=`, the answer can be cached like
+  any `GET`, and the call carries an `x-yawn-fn` header. A `GET` must not change anything.
+- `#[post]`, `#[put]`, `#[patch]` and `#[delete]` send the arguments in the body.
 - Extractors: `#[post(headers: HeaderMap, session: Session)]` names what the body takes from the
   request, any axum `FromRequestParts<()>` type. They are bound as variables in the body and are
   not arguments of the function, so the caller (and the client's version) doesn't see them. Their
@@ -176,14 +175,52 @@ call and never fails. The server binary routes every server function of the proj
 - `#[head]` and `#[options]` are refused: a HEAD answer has no body to return, and OPTIONS is the
   browser's own preflight request.
 
-- Arguments are `name: Type` and, like the result, `serde` types. They come from the browser:
-  validate them as you would any request.
+### The wire format
+
+Arguments are `name: Type` and the answer is the return type. By default both are written with
+`yawn::bits`: positional (no field names), as small as the data allows, and decoded by straight-line
+code. The types are the integers, `bool`, `char`, `f32`/`f64`, `String`, `Vec`, `Option`, `Result`,
+`Box`, tuples, arrays and the standard maps and sets, and your own structs and enums with
+`#[derive(Bits)]`:
+
+```rust
+use yawn::bits::Bits;
+
+#[derive(Bits)]
+struct Todo { id: u64, title: String, tags: Vec<String> }
+
+#[post]
+fn add(title: String) -> Todo { /* ... */ }
+```
+
+A message carries a version byte and a hash of the type, so a page older than the server (or the
+other way round) gets `yawn::fns::Error::Outdated` instead of misread data: reload it. The decoder
+is bounded: values nest at most 64 deep and every length it reads is checked against what is left
+of the message, so a hostile body cannot overflow the stack or reserve memory it does not carry.
+The derive refuses what a positional format cannot write (`serde(flatten)`, `untagged`, `tag`,
+`skip_serializing_if`, `default`...) with a compile error that says what to do instead.
+
+Another encoding is an option of the attribute, `#[post(encoding = json)]`, and takes `serde`
+types:
+
+| `encoding =` | what | needs |
+|---|---|---|
+| `bits` (default) | `Bits` types, positional, bounded, hash of the type | nothing |
+| `json` | readable by anything, for a function called from outside yawn | feature `json` |
+| `postcard` | `serde` types, as small as `bits`; no type hash, no limit on nesting | feature `postcard` |
+| `dynamic` | `serde` types in a self-describing binary format (`flatten`, `untagged`, `serde_json::Value`), bounded | feature `dynamic` |
+
+- The calls a page makes in the same tick are sent as **one request** to `/__yawn/batch`: the
+  server runs them in order, the reads between two writes at once, and answers each by itself (one
+  failing does not fail the others). A lone call is an ordinary request. Nothing in the code
+  changes. A batch has at most 32 calls from the client (64 are accepted).
 - The body is async (`.await` works) and compiled for the server only. Imports it alone needs go
   inside it, or behind `#[cfg(not(target_arch = "wasm32"))]`: the rest of the file is compiled for
   the client as well.
-- The server answers a `#[get]` only with the `x-yawn-fn` header and the others only with
-  `application/json`; a cross-site page can send neither, so it can't call a function with the
-  user's cookies.
+- The server answers a `#[get]` only with the `x-yawn-fn` header and the others only with the
+  content type of their encoding (`application/vnd.yawn.bits`, `application/json`...); a
+  cross-site page can send neither, so it can't call a function with the user's cookies.
+- Arguments come from the browser: validate them as you would any request.
 
 Not supported yet: generics, argument patterns (`(a, b): (u8, u8)`), streaming, and defining one in
 a plain `.rs` file.
