@@ -101,6 +101,8 @@ pub struct Dynamic {
     lld: Option<PathBuf>,
     native: Vec<(String, PathBuf)>,
     learned: BTreeSet<String>,
+    runtime_off: bool,
+    runtime_seen: std::collections::HashMap<PathBuf, ((std::time::SystemTime, u64), BTreeSet<String>)>,
     failures: Option<BTreeSet<String>>,
     sigs: Sigs,
     items: Items,
@@ -339,6 +341,8 @@ impl Dynamic {
             server_exports: BTreeSet::new(),
             blocked: BTreeSet::new(),
             seen: Default::default(),
+            runtime_off: false,
+            runtime_seen: Default::default(),
             snapshot: None,
             version: 0,
             lld: None,
@@ -1229,6 +1233,8 @@ impl Dynamic {
         )
         .replace('-', "_");
         wanted.extend(self.learned.iter().cloned());
+        let runtime = self.runtime_symbols(out_dir_of);
+        wanted.extend(runtime.iter().cloned());
         wanted.extend(self.failure_symbols());
         wanted.retain(|n| !n.contains(&routes));
         wanted.retain(|n| !n.starts_with("__yawn_pub_"));
@@ -1258,7 +1264,18 @@ impl Dynamic {
             text.push('\n');
         }
         std::fs::write(self.rsp(), text)?;
-        let ok = replay::run_recorded(&root.argv, &root.env, &root.cwd, kill, &mut |_| {})?;
+        let mut ok = replay::run_recorded(&root.argv, &root.env, &root.cwd, kill, &mut |_| {})?;
+        if !ok && !runtime.is_empty() {
+            // the guess about what an edit may need was wrong somewhere: keep to what is known
+            wanted.retain(|n| !runtime.contains(n) || self.learned.contains(n));
+            let mut text = String::from("--export-table\n--growable-table\n");
+            for n in &wanted {
+                text.push_str(&format!("--undefined={n}\n--export={n}\n"));
+            }
+            std::fs::write(self.rsp(), text)?;
+            self.runtime_off = true;
+            ok = replay::run_recorded(&root.argv, &root.env, &root.cwd, kill, &mut |_| {})?;
+        }
         if !ok {
             return Ok(false);
         }
@@ -1266,6 +1283,53 @@ impl Dynamic {
         relink_copy(&root.out_dir.join(name), wasm)?;
         self.exports = wanted;
         Ok(true)
+    }
+
+    /// The functions of the `yawn` crates the app is built from. A side module made from an edit can
+    /// call one the app itself never does (the first `{x}` in a text calls the formatter), and the
+    /// linker leaves out what nothing calls, so each of them would cost a full build once. The app
+    /// exports them all from the start: it only weighs more, and only while developing.
+    fn runtime_symbols(
+        &mut self,
+        out_dir_of: &mut dyn FnMut(&str) -> Option<PathBuf>,
+    ) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        if self.runtime_off || std::env::var_os("YAWN_NO_RUNTIME_EXPORTS").is_some() {
+            return out;
+        }
+        for krate in ["yawn_web", "yawn_kit", "yawn_reactivity", "yawn_router"] {
+            let Some(dir) = out_dir_of(krate) else { continue };
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            let prefix = format!("lib{krate}-");
+            let newest = rd
+                .flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with(&prefix) && n.ends_with(".rlib")
+                })
+                .filter_map(|e| {
+                    let m = e.metadata().ok()?;
+                    Some((m.modified().ok()?, m.len(), e.path()))
+                })
+                .max();
+            let Some((mtime, len, rlib)) = newest else { continue };
+            if let Some((stamp, set)) = self.runtime_seen.get(&rlib)
+                && *stamp == (mtime, len)
+            {
+                out.extend(set.iter().cloned());
+                continue;
+            }
+            let Ok(data) = std::fs::read(&rlib) else { continue };
+            let mut set = BTreeSet::new();
+            for (_, obj) in ar_objects(&data) {
+                if let Some(scan) = wasm_scan(obj) {
+                    set.extend(scan.defined.into_iter().filter(|n| n.starts_with("_R")));
+                }
+            }
+            out.extend(set.iter().cloned());
+            self.runtime_seen.insert(rlib, ((mtime, len), set));
+        }
+        out
     }
 
     /// The same for the server binary: the symbols the route libraries take from it
