@@ -3326,6 +3326,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40de123dbb523ebcc00d61ec01840ad192578afc378d859f3429caa38308fad5"
 
 [[package]]
+name = "yawn-bits"
+version = "0.1.0"
+dependencies = [
+ "yawn-bits-derive",
+]
+
+[[package]]
+name = "yawn-bits-derive"
+version = "0.1.0"
+
+[[package]]
 name = "yawn-cli"
 version = "0.1.0"
 dependencies = [
