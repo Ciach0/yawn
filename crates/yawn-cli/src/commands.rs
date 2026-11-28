@@ -48,6 +48,41 @@ pub fn dev_session(args: &DevArgs, level: Level) -> Result<Session, CliError> {
 }
 
 /// `yawn rsx`: compiles the project's `.rsx` files and prints rustc-style errors
+/// Deletes `target/` and `.yawn/` of the project in the current directory, which the next build
+/// makes again. A running `yawn dev` is in the way: it holds both
+pub fn clean() -> Result<(), CliError> {
+    let cwd = std::env::current_dir()?;
+    let project = Project::detect(&cwd)?;
+    if yawn_rsx::project::dev_running(&project.root) {
+        return Err(CliError::new("yawn dev is running in this project")
+            .hint("stop it first (Ctrl-C), it keeps files in target/ and .yawn/"));
+    }
+    let mut freed = 0u64;
+    for name in ["target", ".yawn"] {
+        let dir = project.root.join(name);
+        if !dir.exists() {
+            continue;
+        }
+        freed += size_of(&dir);
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| CliError::new(format!("cannot remove {}: {e}", dir.display())))?;
+        println!("removed {}", dir.display());
+    }
+    println!("freed {:.1} MB", freed as f64 / 1_048_576.0);
+    Ok(())
+}
+
+fn size_of(dir: &std::path::Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => size_of(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
 pub fn rsx(json: bool) -> Result<std::process::ExitCode, CliError> {
     use crate::dev::rsx;
     let cwd = std::env::current_dir()?;

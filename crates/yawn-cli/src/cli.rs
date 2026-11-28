@@ -49,6 +49,8 @@ pub enum Command {
     /// Create a new project in a new directory
     #[command(visible_alias = "init")]
     New(NewArgs),
+    /// Remove what builds leave in the project: `target/` and `.yawn/` (not `dist/`)
+    Clean,
     /// Install the latest release of the `yawn` tool
     Upgrade(UpgradeArgs),
     /// Show the environment Yawn sees
@@ -114,6 +116,7 @@ pub fn execute(cli: Cli, caps: &Caps) -> Result<ExitCode, CliError> {
             println!("created {}\n\n  cd {}\n  yawn dev", dir.display(), dir.display());
         }
         Some(Command::Upgrade(args)) => crate::upgrade::run(args.check)?,
+        Some(Command::Clean) => commands::clean()?,
         Some(Command::Rsx) => return commands::rsx(cli.global.json),
         Some(Command::Build(args)) => return crate::build::run(&args),
         Some(Command::Dev(args)) => {
@@ -156,6 +159,7 @@ mod tests {
         };
         assert!(n.tailwind && n.path.ends_with("my-app"));
         assert!(parse(&["upgrade", "--check"]).unwrap().command.is_some());
+        assert!(parse(&["clean"]).unwrap().command.is_some());
     }
 
     #[test]
