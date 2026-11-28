@@ -229,6 +229,12 @@ types:
   p.age)`), so a field that does not exist is a compile error. A piece is good for the tick it was
   made in, and it needs the browser: while rendering on the server a piece has no value and the call
   fails.
+- **WebSocket.** With the `yawn-web` features `ws` (server) and `socket` (browser), batches travel
+  over one socket the page opens on first use at `/__yawn/ws`. The extractors (session, headers)
+  run against the upgrade request, which is checked once, and the browser skips a request's
+  headers and handshake each time. A socket that is not there, was closed or timed out falls back
+  to fetch with the same batch. The upgrade is refused (403) when its `Origin` is not the host, so
+  another site cannot ride on the user's cookies.
 - The body is async (`.await` works) and compiled for the server only. Imports it alone needs go
   inside it, or behind `#[cfg(not(target_arch = "wasm32"))]`: the rest of the file is compiled for
   the client as well.

@@ -163,6 +163,10 @@ async fn single(call: &Call) -> Answer {
 
 async fn many(calls: &[Call]) -> Vec<Answer> {
     let body = batch::encode_request(calls);
+    #[cfg(feature = "socket")]
+    if let Some(answers) = over_socket(&body, calls.len()).await {
+        return answers;
+    }
     let headers = [("content-type".to_string(), BATCH_CONTENT_TYPE.to_string())];
     let fetched = fetch_bytes(FetchRequest {
         url: BATCH_URL,
@@ -183,5 +187,25 @@ async fn many(calls: &[Call]) -> Vec<Answer> {
     match batch::decode_response(&r.body, calls.len()) {
         Some(replies) => replies.into_iter().map(Ok).collect(),
         None => failed(Error::Body("the batch answer is not readable".into())),
+    }
+}
+
+/// The batch over the socket. A batch that did not get through (no socket, closed on the way) goes
+/// again by fetch, so the socket is only ever a faster road; a batch the server refused to read is
+/// an answer, not a reason to try again.
+#[cfg(feature = "socket")]
+async fn over_socket(body: &[u8], calls: usize) -> Option<Vec<Answer>> {
+    let frame = crate::dom::socket_batch(body).await?;
+    let (&ok, rest) = frame.split_first()?;
+    if ok != 0 {
+        let e = Error::Body("the server could not read the batch".into());
+        return Some((0..calls).map(|_| Err(e.clone())).collect());
+    }
+    match batch::decode_response(rest, calls) {
+        Some(replies) => Some(replies.into_iter().map(Ok).collect()),
+        None => {
+            let e = Error::Body("the batch answer is not readable".into());
+            Some((0..calls).map(|_| Err(e.clone())).collect())
+        }
     }
 }

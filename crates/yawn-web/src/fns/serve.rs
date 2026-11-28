@@ -224,7 +224,7 @@ where
 /// The route that runs the calls of a batch
 #[doc(hidden)]
 pub fn batch_route(router: axum::Router) -> axum::Router {
-    router.route(BATCH_URL, axum::routing::post(batch))
+    socket_route(router.route(BATCH_URL, axum::routing::post(batch)))
 }
 
 /// The request one call of a batch is answered under: the batch's own, with the call's method and
@@ -311,6 +311,13 @@ async fn batch(request: Request) -> Response {
     let Some(calls) = batch::decode_request(&body, MAX_CALLS_SERVED) else {
         return (StatusCode::BAD_REQUEST, "the batch is not readable").into_response();
     };
+    let replies = run_calls(&parts, calls).await;
+    ([(header::CONTENT_TYPE, BATCH_CONTENT_TYPE)], batch::encode_response(&replies)).into_response()
+}
+
+/// Runs the calls of a batch in order, the reads between two writes together, each answered
+/// under `parts`, the request that brought them
+async fn run_calls(parts: &Parts, calls: Vec<batch::Call>) -> Vec<Reply> {
     let mut wanted: Vec<Vec<Vec<u32>>> = vec![Vec::new(); calls.len()];
     for call in &calls {
         for hole in &call.holes {
@@ -331,7 +338,7 @@ async fn batch(request: Request) -> Response {
             done[i] = Some(failed(refused(StatusCode::METHOD_NOT_ALLOWED, "wrong method")));
             continue;
         }
-        let Some(request) = request_of(&parts, &call) else {
+        let Some(request) = request_of(parts, &call) else {
             done[i] = Some(failed(refused(StatusCode::BAD_REQUEST, "bad url")));
             continue;
         };
@@ -357,13 +364,11 @@ async fn batch(request: Request) -> Response {
         }
     }
     settle(&mut done, &mut reads).await;
-    let replies: Vec<Reply> = done
-        .into_iter()
+    done.into_iter()
         .map(|d| {
             d.map_or_else(|| refused(StatusCode::INTERNAL_SERVER_ERROR, "no answer"), |d| d.reply)
         })
-        .collect();
-    ([(header::CONTENT_TYPE, BATCH_CONTENT_TYPE)], batch::encode_response(&replies)).into_response()
+        .collect()
 }
 
 fn failed(reply: Reply) -> Done {
@@ -381,6 +386,139 @@ async fn settle(
             Ok(d) => d,
             Err(_) => failed(refused(StatusCode::INTERNAL_SERVER_ERROR, "the function panicked")),
         });
+    }
+}
+
+/// The route of the socket, when it is built in
+#[cfg(feature = "ws")]
+fn socket_route(router: axum::Router) -> axum::Router {
+    router.route(socket::URL, axum::routing::get(socket::upgrade))
+}
+
+#[cfg(not(feature = "ws"))]
+fn socket_route(router: axum::Router) -> axum::Router {
+    router
+}
+
+#[cfg(feature = "ws")]
+mod socket {
+    use super::{BODY_LIMIT, MAX_CALLS_SERVED, Parts, batch, run_calls};
+    use axum::extract::FromRequestParts;
+    use axum::extract::Request;
+    use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+    use std::sync::Arc;
+    use tokio::sync::{Semaphore, mpsc};
+    use yawn_bits::{Reader, put_varint};
+
+    pub(super) const URL: &str = "/__yawn/ws";
+
+    /// Calls a connection runs at once; the next frame waits for one to finish
+    const IN_FLIGHT: usize = 32;
+
+    /// The answer frame of a request that could not be run
+    const BAD_FRAME: u8 = 1;
+
+    /// A page of another site can open a socket with the user's cookies, which a request it could
+    /// only send with a header the server never agreed to cannot do. A browser always says where
+    /// the page came from, so the page must come from this host; a client with no `Origin` is not
+    /// a page.
+    pub(super) fn same_origin(headers: &HeaderMap) -> bool {
+        let Some(origin) = headers.get(header::ORIGIN) else { return true };
+        let (Ok(origin), Some(host)) =
+            (origin.to_str(), headers.get(header::HOST).and_then(|h| h.to_str().ok()))
+        else {
+            return false;
+        };
+        origin.split_once("://").is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(host))
+    }
+
+    pub(super) async fn upgrade(request: Request) -> Response {
+        let (mut parts, _) = request.into_parts();
+        if !same_origin(&parts.headers) {
+            return (StatusCode::FORBIDDEN, "a socket opens from this site only").into_response();
+        }
+        let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(u) => u,
+            Err(rejection) => return rejection.into_response(),
+        };
+        upgrade
+            .max_message_size(BODY_LIMIT)
+            .max_frame_size(BODY_LIMIT)
+            .on_upgrade(move |socket| connection(socket, parts))
+    }
+
+    /// One frame in: the id the client gave the batch, the batch. One frame out: the id, a byte
+    /// that is 0 when the batch ran, the answers.
+    async fn connection(mut socket: WebSocket, parts: Parts) {
+        let parts = Arc::new(parts);
+        let slots = Arc::new(Semaphore::new(IN_FLIGHT));
+        let (out, mut answers) = mpsc::unbounded_channel::<Vec<u8>>();
+        loop {
+            tokio::select! {
+                frame = socket.recv() => {
+                    let Some(Ok(Message::Binary(frame))) = frame else {
+                        match frame {
+                            Some(Ok(Message::Text(_))) => continue,
+                            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                            _ => break,
+                        }
+                    };
+                    let Ok(permit) = slots.clone().acquire_owned().await else { break };
+                    let (parts, out) = (parts.clone(), out.clone());
+                    tokio::spawn(async move {
+                        let _ = out.send(answer(&parts, &frame).await);
+                        drop(permit);
+                    });
+                }
+                Some(bytes) = answers.recv() => {
+                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn answer(parts: &Parts, frame: &[u8]) -> Vec<u8> {
+        let mut r = Reader::new(frame);
+        let id = r.varint();
+        let rest = r.rest();
+        let mut out = Vec::new();
+        put_varint(&mut out, id);
+        match batch::decode_request(rest, MAX_CALLS_SERVED) {
+            Some(calls) => {
+                out.push(0);
+                out.extend(batch::encode_response(&run_calls(parts, calls).await));
+            }
+            None => out.push(BAD_FRAME),
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_this_site_may_open_a_socket() {
+            let h = |origin: Option<&str>, host: &str| {
+                let mut h = HeaderMap::new();
+                if let Some(o) = origin {
+                    h.insert(header::ORIGIN, o.parse().unwrap());
+                }
+                h.insert(header::HOST, host.parse().unwrap());
+                h
+            };
+            assert!(same_origin(&h(Some("https://example.com"), "example.com")));
+            assert!(same_origin(&h(Some("http://localhost:8080"), "localhost:8080")));
+            assert!(same_origin(&h(None, "example.com")));
+            assert!(!same_origin(&h(Some("https://evil.test"), "example.com")));
+            assert!(!same_origin(&h(Some("https://example.com.evil.test"), "example.com")));
+            assert!(!same_origin(&h(Some("https://example.com:81"), "example.com")));
+            assert!(!same_origin(&h(Some("null"), "example.com")));
+        }
     }
 }
 
@@ -464,7 +602,7 @@ mod tests {
     }
 
     fn run<F: Future>(f: F) -> F::Output {
-        tokio::runtime::Builder::new_multi_thread().enable_time().build().unwrap().block_on(f)
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(f)
     }
 
     async fn send(
@@ -703,5 +841,94 @@ mod tests {
             .await;
             assert_eq!(replies.iter().map(|r| r.status).collect::<Vec<_>>(), vec![404, 424]);
         });
+    }
+
+    #[cfg(feature = "ws")]
+    mod sockets {
+        use super::*;
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
+        use yawn_bits::put_varint;
+
+        async fn serve_app() -> std::net::SocketAddr {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app()).await.unwrap() });
+            addr
+        }
+
+        fn frame(id: u64, calls: &[batch::Call]) -> Vec<u8> {
+            let mut f = Vec::new();
+            put_varint(&mut f, id);
+            f.extend(batch::encode_request(calls));
+            f
+        }
+
+        fn request(
+            addr: std::net::SocketAddr,
+            origin: Option<&str>,
+        ) -> tungstenite::handshake::client::Request {
+            let mut r = format!("ws://{addr}/__yawn/ws").into_client_request().unwrap();
+            r.headers_mut().insert("x-user", "robert".parse().unwrap());
+            if let Some(o) = origin {
+                r.headers_mut().insert("origin", o.parse().unwrap());
+            }
+            r
+        }
+
+        #[test]
+        fn a_socket_runs_batches_under_the_request_that_opened_it() {
+            run(async {
+                let addr = serve_app().await;
+                let origin = format!("http://{addr}");
+                let (mut ws, _) =
+                    tokio_tungstenite::connect_async(request(addr, Some(&origin))).await.unwrap();
+                let sum = call(Method::Post, "/__yawn/fn/t/add", bits(&(40i32, 2i32)));
+                let who = call(Method::Get, "/__yawn/fn/t/who", bits(&()));
+                ws.send(tungstenite::Message::Binary(frame(7, &[sum.clone(), who.clone()]).into()))
+                    .await
+                    .unwrap();
+                ws.send(tungstenite::Message::Text("ignored".into())).await.unwrap();
+                ws.send(tungstenite::Message::Binary(frame(8, &[sum]).into())).await.unwrap();
+                let mut got = std::collections::HashMap::new();
+                while got.len() < 2 {
+                    let Some(Ok(tungstenite::Message::Binary(b))) = ws.next().await else {
+                        panic!("a frame")
+                    };
+                    let mut r = yawn_bits::Reader::new(&b);
+                    let id = r.varint();
+                    let ok = r.byte();
+                    assert_eq!(ok, 0);
+                    let calls = if id == 7 { 2 } else { 1 };
+                    got.insert(id, batch::decode_response(r.rest(), calls).expect("answers"));
+                }
+                assert_eq!(yawn_bits::from_slice::<i32>(&got[&7][0].body), Ok(42));
+                assert_eq!(
+                    yawn_bits::from_slice::<usize>(&got[&7][1].body),
+                    Ok(6),
+                    "the headers of the upgrade"
+                );
+                assert_eq!(yawn_bits::from_slice::<i32>(&got[&8][0].body), Ok(42));
+                ws.send(tungstenite::Message::Binary(vec![9, 9].into())).await.unwrap();
+                let Some(Ok(tungstenite::Message::Binary(b))) = ws.next().await else {
+                    panic!("a frame")
+                };
+                assert_eq!(b[1], 1, "a frame that is not a batch is answered, not dropped");
+            });
+        }
+
+        #[test]
+        fn a_page_of_another_site_cannot_open_a_socket() {
+            run(async {
+                let addr = serve_app().await;
+                let refused =
+                    tokio_tungstenite::connect_async(request(addr, Some("https://evil.test")))
+                        .await;
+                match refused {
+                    Err(tungstenite::Error::Http(r)) => assert_eq!(r.status(), 403),
+                    other => panic!("expected a refusal, got {other:?}"),
+                }
+            });
+        }
     }
 }

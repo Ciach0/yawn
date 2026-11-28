@@ -162,6 +162,11 @@ impl<'a> Reader<'a> {
         self.err.is_some()
     }
 
+    /// What has not been read yet
+    pub fn rest(&self) -> &'a [u8] {
+        &self.buf[self.pos..]
+    }
+
     #[inline(never)]
     pub fn byte(&mut self) -> u8 {
         match self.buf.get(self.pos) {
