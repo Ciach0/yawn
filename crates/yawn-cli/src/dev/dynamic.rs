@@ -1297,6 +1297,7 @@ impl Dynamic {
         if self.runtime_off || std::env::var_os("YAWN_NO_RUNTIME_EXPORTS").is_some() {
             return out;
         }
+        out.extend(self.std_symbols());
         for krate in ["yawn_web", "yawn_kit", "yawn_reactivity", "yawn_router"] {
             let Some(dir) = out_dir_of(krate) else { continue };
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
@@ -1330,6 +1331,47 @@ impl Dynamic {
             self.runtime_seen.insert(rlib, ((mtime, len), set));
         }
         out
+    }
+
+    /// What the standard library of the wasm target defines that an edit may need first: the
+    /// allocator entry points (`__rust_alloc_zeroed`) and the out of line code of `core` and `alloc`
+    fn std_symbols(&mut self) -> BTreeSet<String> {
+        if let Some((_, set)) = self.runtime_seen.get(Path::new("<std>")) {
+            return set.clone();
+        }
+        let mut set = BTreeSet::new();
+        let dir = Command::new("rustc")
+            .args(["--print", "target-libdir", "--target", "wasm32-unknown-unknown"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+        if let Some(dir) = dir
+            && let Ok(rd) = std::fs::read_dir(dir)
+        {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                let std_crate = ["libstd-", "liballoc-", "libcore-"].iter().any(|p| n.starts_with(p));
+                if !(std_crate && n.ends_with(".rlib")) {
+                    continue;
+                }
+                let Ok(data) = std::fs::read(e.path()) else { continue };
+                for (_, obj) in ar_objects(&data) {
+                    if let Some(scan) = wasm_scan(obj) {
+                        set.extend(
+                            scan.defined
+                                .into_iter()
+                                .filter(|n| n.starts_with("_R") || n.starts_with("__rust_")),
+                        );
+                    }
+                }
+            }
+        }
+        self.runtime_seen.insert(
+            PathBuf::from("<std>"),
+            ((std::time::SystemTime::UNIX_EPOCH, 0), set.clone()),
+        );
+        set
     }
 
     /// The same for the server binary: the symbols the route libraries take from it
