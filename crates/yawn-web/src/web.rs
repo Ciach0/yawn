@@ -546,23 +546,38 @@ fn hydrate<C: Component>(host: &Node, root: C) -> bool {
 
 /// Starts the client: installs a panic hook that logs to the console and mounts `root` into `#app`,
 /// replacing its content
-pub fn start<C: Component>(root: C) {
+pub fn start<C: Component + 'static>(root: C) {
     let mut root = Some(root);
     start_with(move || root.take().expect("yawn: the root is built once"));
 }
 
 /// Starts the client with a root that can be built again
-pub fn start_with<C: Component>(mut make: impl FnMut() -> C) {
+pub fn start_with<C: Component + 'static>(make: impl FnMut() -> C + 'static) {
     std::panic::set_hook(Box::new(|info| {
         let text = info.to_string();
         dom::error(&text);
         dom::show_panic(&text);
     }));
     let host = document().get_element_by_id("app").expect("missing <div id=\"app\">");
+    let make = std::rc::Rc::new(RefCell::new(make));
+    let build = {
+        let make = make.clone();
+        move || (make.borrow_mut())()
+    };
+    let build_again = build.clone();
+    REMOUNT.with(|r| {
+        *r.borrow_mut() = Some(Box::new(move || {
+            let Some(host) = document().get_element_by_id("app") else { return };
+            host.set_text_content(None);
+            let mut backend = WebBackend::new();
+            let id = backend.adopt(host);
+            crate::ui::mount(Box::new(backend), id, build_again());
+        }))
+    });
     // a client replaced by a hot reload finds the page as the old one left it, so there's no server markup to adopt
     let replaced = dom::window().is_some_and(|win| dom::get_number(&win, "__yawnReplaced") == 1.0);
     if host.has_child_nodes() && !replaced {
-        if hydrate(&host, make()) {
+        if hydrate(&host, build()) {
             return;
         }
         dom::warn(&format!(
@@ -576,7 +591,7 @@ pub fn start_with<C: Component>(mut make: impl FnMut() -> C) {
     host.set_text_content(None);
     let mut backend = WebBackend::new();
     let id = backend.adopt(host);
-    crate::ui::mount(Box::new(backend), id, make());
+    crate::ui::mount(Box::new(backend), id, build());
 }
 
 /// Declares the client entry point: `yawn::client!(counter::Counter);` mounts the component (built
@@ -631,6 +646,22 @@ pub(crate) fn dev_literal(kind: &str, value: &'static str) -> &'static str {
             .entry(current.clone())
             .or_insert_with(|| Box::leak(current.into_boxed_str()))
     })
+}
+
+thread_local! {
+    static REMOUNT: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
+}
+
+/// Dev: builds the application again in the page it is in, with the signals' values kept. Used
+/// after a module with new bodies was loaded
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn remount() {
+    let Some(mut again) = REMOUNT.with(|r| r.borrow_mut().take()) else { return };
+    crate::ui::keep::carry(|| {
+        crate::ui::rt::dispose_document();
+        again();
+    });
+    REMOUNT.with(|r| *r.borrow_mut() = Some(again));
 }
 
 /// Dev: saves the signals' values for the next page load, without ending this client

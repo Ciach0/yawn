@@ -31,6 +31,11 @@ pub enum Control {
     Patch {
         rev: u64,
     },
+    /// Only modules were built: the page loads them and builds its components again, the application
+    /// itself stays
+    Module {
+        rev: u64,
+    },
     Css {
         rev: u64,
         href: String,
@@ -68,6 +73,7 @@ pub fn parse_control(line: &str) -> Option<Control> {
     match cmd {
         "reload" => Some(Control::Reload { rev }),
         "patch" => Some(Control::Patch { rev }),
+        "module" => Some(Control::Module { rev }),
         "nossr" => Some(Control::NoSsr { rev }),
         "data" if !arg.is_empty() => Some(Control::Data { rev, path: unescape(arg) }),
         "css" if !arg.is_empty() => Some(Control::Css { rev, href: arg.to_string() }),
@@ -107,6 +113,7 @@ impl Control {
     pub fn to_json(&self) -> String {
         match self {
             Control::Patch { rev } => format!("{{\"kind\":\"patch\",\"rev\":{rev}}}"),
+            Control::Module { rev } => format!("{{\"kind\":\"module\",\"rev\":{rev}}}"),
             Control::Reload { rev } => format!("{{\"kind\":\"reload\",\"rev\":{rev}}}"),
             Control::Css { rev, href } => {
                 format!("{{\"kind\":\"css\",\"rev\":{rev},\"href\":{}}}", json_string(href))
@@ -157,6 +164,8 @@ mod tests {
                 .contains("\"total\":3")
         );
         assert_eq!(parse_control("patch 9"), Some(Control::Patch { rev: 9 }));
+        assert_eq!(parse_control("module 5"), Some(Control::Module { rev: 5 }));
+        assert_eq!(Control::Module { rev: 5 }.to_json(), "{\"kind\":\"module\",\"rev\":5}");
         assert_eq!(Control::Patch { rev: 9 }.to_json(), "{\"kind\":\"patch\",\"rev\":9}");
         assert_eq!(parse_control("nossr 9"), Some(Control::NoSsr { rev: 9 }));
         assert_eq!(

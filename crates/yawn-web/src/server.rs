@@ -523,7 +523,7 @@ impl DevHub {
         {
             let mut st = self.state.lock().unwrap();
             match &c {
-                Control::Reload { rev } | Control::Patch { rev } => {
+                Control::Reload { rev } | Control::Patch { rev } | Control::Module { rev } => {
                     st.rev = *rev;
                     st.error = None;
                     st.progress = None;
@@ -664,7 +664,8 @@ async fn current_rev(State(s): State<Shared>) -> Response {
 async fn loaded(Query(q): Query<HashMap<String, String>>) -> StatusCode {
     let rev = q.get("rev").map(String::as_str).unwrap_or("0");
     let kind = q.get("kind").map(String::as_str).unwrap_or("reload");
-    emit("loaded", &format!("{rev} {kind}"));
+    let detail = q.get("detail").map(|d| d.replace(['\n', '\r'], " ")).unwrap_or_default();
+    emit("loaded", &format!("{rev} {kind} {detail}"));
     StatusCode::NO_CONTENT
 }
 
@@ -800,6 +801,9 @@ async fn production_cache(req: Request, next: Next) -> Response {
 }
 
 async fn development_cache(req: Request, next: Next) -> Response {
+    if req.uri().path().starts_with("/api/") {
+        crate::dev::refresh_native();
+    }
     let versioned = req.uri().path().starts_with("/pkg/")
         && req.uri().query().is_some_and(|q| q.starts_with("v="));
     let value = if versioned { "public, max-age=31536000, immutable" } else { "no-store" };

@@ -66,8 +66,8 @@
     note.textContent = 'building' + (total ? ' ' + done + '/' + total : '') + (label ? ' \u00b7 ' + label : '');
   }
   if (boot.progress) showProgress(boot.progress.done, boot.progress.total, boot.progress.label);
-  function beacon(rev, kind) {
-    try { fetch('/__yawn/loaded?rev=' + rev + '&kind=' + kind, { keepalive: true }); } catch (e) {}
+  function beacon(rev, kind, detail) {
+    try { fetch('/__yawn/loaded?rev=' + rev + '&kind=' + kind + (detail ? '&detail=' + encodeURIComponent(detail) : ''), { keepalive: true }); } catch (e) {}
   }
   window.__yawnLoaded = function () { beacon(boot.rev, 'reload'); };
   var stylesReady = Promise.resolve();
@@ -167,6 +167,17 @@
       hideError(); hideProgress(); beacon(rev, 'client');
     }).catch(function (error) { console.warn('yawn: client replacement failed', error); reloadKeeping(); });
   }
+  function swapModules(rev) {
+    patchQueue = patchQueue.then(async function () {
+      if (rev <= applied) return;
+      var load = globalThis.__yawn_refresh;
+      if (!load) throw new Error('No module loader');
+      var count = await load();
+      if (count < 0) throw new Error('Modules cannot be loaded into this client');
+      boot.rev = applied = rev;
+      hideError(); hideProgress(); beacon(rev, 'module', globalThis.__yawn_timing);
+    }).catch(function (error) { console.warn('yawn: module swap requires client replacement', error); setTimeout(function () { softReload(rev); }, 0); });
+  }
   function patch(rev) {
     patchQueue = patchQueue.then(async function () {
       var r = await fetch('/__yawn/literals.json?v=' + rev, {cache: 'no-store'});
@@ -228,6 +239,7 @@
       if (m.kind !== 'progress' && m.rev > seen) seen = m.rev;
       if (m.kind === 'reload') { softReload(m.rev); }
       else if (m.kind === 'patch') { patch(m.rev); }
+      else if (m.kind === 'module') { swapModules(m.rev); }
       else if (m.kind === 'css') { hideProgress(); swapCss(m.href, m.rev); }
       else if (m.kind === 'error') { hideProgress(); showError(m.text); }
       else if (m.kind === 'progress') showProgress(m.done, m.total, m.label);

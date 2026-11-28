@@ -94,8 +94,9 @@ pub(crate) fn refresh_native() {
             continue;
         }
         let Ok(c) = std::ffi::CString::new(file.clone()) else { continue };
-        // the handle is never closed: bodies the library registered may still be running
-        let handle = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        // the handle is never closed: bodies the library registered may still be running. The symbols are
+        // global so that a library built later finds the functions with a new signature in this one
+        let handle = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
         if handle.is_null() {
             let err = unsafe { libc::dlerror() };
             let why = if err.is_null() {
