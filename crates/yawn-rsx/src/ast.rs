@@ -108,6 +108,10 @@ pub struct ServerFn {
 pub struct Component {
     pub name: String,
     pub name_span: Span,
+    /// `<T: Bound, 'a>` as written, if the component is generic
+    pub generics: Option<Span>,
+    /// What follows the name in an impl: `<T, 'a>`, empty when the component isn't generic
+    pub generic_args: String,
     pub params: Vec<Param>,
     /// Rust statements that run once when the component is created
     pub setup: Span,

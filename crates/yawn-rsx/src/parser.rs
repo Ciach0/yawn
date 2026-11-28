@@ -110,7 +110,13 @@ pub fn headers(src: &str) -> Vec<Header> {
                 let mut params = Vec::new();
                 let mut defaults = Vec::new();
                 let mut next = name_end;
-                if let Ok(p) = scan::skip_trivia(src, name_end, src.len())
+                if let Ok(g) = scan::skip_trivia(src, name_end, src.len())
+                    && src[g..].starts_with('<')
+                    && let Ok(close) = scan::find_angle_close(src, g, src.len())
+                {
+                    next = close + 1;
+                }
+                if let Ok(p) = scan::skip_trivia(src, next, src.len())
                     && src[p..].starts_with('(')
                     && let Ok(close) = scan::find_close(src, p, src.len())
                 {
@@ -364,6 +370,37 @@ fn parse_component(src: &str, after_kw: usize) -> Result<(Component, usize)> {
     let name_span = i..name_end;
     i = scan::skip_trivia(src, name_end, src.len())?;
 
+    let (mut generics, mut generic_args) = (None, String::new());
+    if src[i..].starts_with('<') {
+        let close = scan::find_angle_close(src, i, src.len())?;
+        let text = &src[i..=close];
+        let parsed =
+            syn::parse_str::<syn::Generics>(text).map_err(|e| map_wrapped(&e, text, 0, i, text))?;
+        let mut args = Vec::new();
+        for p in &parsed.params {
+            let (arg, default) = match p {
+                syn::GenericParam::Lifetime(l) => (l.lifetime.to_string(), None),
+                syn::GenericParam::Type(t) => {
+                    (t.ident.to_string(), t.default.as_ref().map(|d| d.0.span))
+                }
+                syn::GenericParam::Const(c) => {
+                    (c.ident.to_string(), c.default.as_ref().map(|d| d.0.span))
+                }
+            };
+            // the impls repeat the parameters, and an impl takes no defaults
+            if let Some(at) = default {
+                let e = syn::Error::new(at, "a component's generic parameter has no default");
+                return Err(map_wrapped(&e, text, 0, i, text).help(
+                    "the props the caller passes decide the type: write `<T>` or `<T: Bound>`",
+                ));
+            }
+            args.push(arg);
+        }
+        generics = Some(i..close + 1);
+        generic_args = format!("<{}>", args.join(", "));
+        i = scan::skip_trivia(src, close + 1, src.len())?;
+    }
+
     let mut params = Vec::new();
     if src[i..].starts_with('(') {
         let close = scan::find_close(src, i, src.len())?;
@@ -433,7 +470,10 @@ fn parse_component(src: &str, after_kw: usize) -> Result<(Component, usize)> {
     let _ = vkw;
     let mut p = Template { src, pos: vopen + 1, end: vclose };
     let view = p.children(&Close::Eof)?;
-    Ok((Component { name, name_span, params, setup, view, style }, close + 1))
+    Ok((
+        Component { name, name_span, generics, generic_args, params, setup, view, style },
+        close + 1,
+    ))
 }
 
 fn parse_params(src: &str, from: usize, to: usize) -> Result<Vec<Param>> {

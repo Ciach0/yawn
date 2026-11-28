@@ -32,6 +32,7 @@ component Counter() {                 // props are fields: `component Card(title
 |---|---|
 | `<tag attr="text">` | HTML element; void tags (`input`, `br`, ...) need no closing tag |
 | `<Name prop={expr} flag />` | component: a struct literal `Name { prop: expr, flag: true }`, rendered once. A string value goes through `Into`, so `title="x"` fills a `String` or `&str` |
+| `component List<T: Clone>(items: Vec<T>)` | generic component: the props the caller passes decide `T` (`<List items={vec![1, 2]} />`), so each parameter needs a prop whose type mentions it. Bounds go inside `<>` (`where` isn't supported) and a parameter takes no default (`<T = u8>`). In `yawn dev` an edit of a generic component rebuilds the app: its body can't be swapped in place like the others' |
 | `"text {expr} {n:03} {{"` | string; `{expr}` interpolates (`format!` specs allowed). Without `{}` it's static |
 | `{expr}` | a child: numbers, strings, signals/memos become a text node that follows them; a `View` or `Children` is inserted once |
 | `name="x {expr}"`, `name={expr}` | attribute; reactive when it reads signals. `bool` sets/removes a valueless attribute, `Option` `None` removes it |
@@ -48,7 +49,7 @@ component Counter() {                 // props are fields: `component Card(title
 | `<slot />` | where a component with a `children: Children` prop places what was written between its tags. `<slot name="x" />` places the prop `x: Children`, which the caller fills with `slot="x"` on a child (`<b slot="x">`) or with the contents of `<template slot="x">`; anything without a `slot` goes to `children`. A slot is built each time it's placed, so one inside `if` follows the branch (captured Strings must be signals, as in any branch) |
 
 Not supported (clear diagnostics where it can be detected): `match`/`while`/`loop` in a view
-(compute it in setup and write `{value}`), text without quotes, generics on components, a `<style>`
+(compute it in setup and write `{value}`), text without quotes, a `<style>`
 scope (`style { }` is global), `async`.
 
 ## Architecture

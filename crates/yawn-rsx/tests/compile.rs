@@ -400,14 +400,55 @@ fn style_block_is_collected_and_not_part_of_setup() {
 }
 
 #[test]
+fn generic_component() {
+    let src = "component List<T: Clone, F: Fn(T) -> View>(items: Vec<T>, row: F, sep: String = \", \".into()) { view { <b /> } }";
+    let out = ok(src);
+    assert!(out.contains("pub struct List<T: Clone, F: Fn(T) -> View> {"), "{out}");
+    assert!(out.contains("impl<T: Clone, F: Fn(T) -> View> List<T, F> {"), "{out}");
+    assert!(
+        out.contains("impl<T: Clone, F: Fn(T) -> View> ::yawn::ui::Component for List<T, F> {"),
+        "{out}"
+    );
+    let h = &yawn_rsx::parser::headers(src)[0];
+    assert_eq!((h.name.as_str(), h.defaults.as_slice()), ("List", ["sep".to_string()].as_slice()));
+    assert_eq!(h.params.len(), 3, "the parentheses of `Fn(T)` are not the props");
+}
+
+#[test]
+fn generic_component_errors() {
+    let src = "component A<T = u8>(x: T) { view { <b /> } }";
+    let (d, _) = err(src);
+    assert!(d.message.contains("has no default"), "{}", d.message);
+    assert_eq!(pointed(src, &d), "=");
+    let src = "component A<T U>(x: T) { view { <b /> } }";
+    let (d, _) = err(src);
+    assert_eq!(pointed(src, &d), "U", "{}", d.message);
+    let (d, _) = err("component A<T(x: T) { view { <b /> } }");
+    assert_eq!(d.message, "unclosed `<`");
+}
+
+#[test]
 fn props_may_have_defaults() {
     let out = ok(
         "component Tag(label: String, tone: u8 = 3, items: Vec<u8> = vec![1, 2], note: Option<String> = None) { view { <b /> } }",
     );
     assert!(out.contains("pub tone: u8,"), "{out}");
-    assert!(out.contains("pub fn __default_tone() -> u8 { 3 }"), "{out}");
-    assert!(out.contains("pub fn __default_items() -> Vec<u8> { vec![1, 2] }"), "{out}");
-    assert!(out.contains("pub fn __default_note() -> Option<String> { None }"), "{out}");
+    assert!(
+        out.contains("pub fn __default_tone(_: ::core::marker::PhantomData<Self>) -> u8 { 3 }"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "pub fn __default_items(_: ::core::marker::PhantomData<Self>) -> Vec<u8> { vec![1, 2] }"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "pub fn __default_note(_: ::core::marker::PhantomData<Self>) -> Option<String> { None }"
+        ),
+        "{out}"
+    );
     assert!(!out.contains("__default_label"), "{out}");
 }
 
@@ -418,7 +459,7 @@ fn a_prop_left_out_takes_its_default_when_the_component_is_known() {
     let src = "component Page() { view { <Tag label=\"a\" tone={5} /> } }";
     let out = yawn_rsx::compile_with(src, "t.rsx", &known).unwrap().rust;
     assert!(out.contains("tone: (5),"), "{out}");
-    assert!(out.contains("note: Tag::__default_note(),"), "{out}");
+    assert!(out.contains("note: Tag::__default_note(__d"), "{out}");
     assert!(!out.contains("Tag::__default_tone"), "a prop that was given is not filled in: {out}");
 }
 
@@ -429,12 +470,12 @@ fn a_prop_filled_by_a_slot_is_not_defaulted_as_well() {
     let src = "component Page() { view { <Box><template slot=\"action\"><b /></template></Box> <Box /> } }";
     let out = yawn_rsx::compile_with(src, "t.rsx", &known).unwrap().rust;
     assert_eq!(
-        out.matches("action: ").count() - out.matches("action: Box::__default_action(),").count(),
+        out.matches("action: ").count() - out.matches("action: Box::__default_action(").count(),
         1,
         "a slot fills it once: {out}"
     );
     assert_eq!(
-        out.matches("Box::__default_action(),").count(),
+        out.matches("Box::__default_action(").count(),
         1,
         "only the call that left it out takes the default: {out}"
     );

@@ -37,7 +37,14 @@ pub fn components(src: &str) -> Vec<Comp> {
                     continue;
                 }
                 let (mut j, mut paren, mut open) = (n1, 0i32, None);
-                let mut params = (n1, n1);
+                // the props are the first parentheses after the generics: `<F: Fn(u8)>` has its own
+                if let Ok(g) = scan::skip_trivia(src, n1, src.len())
+                    && src[g..].starts_with('<')
+                    && let Ok(close) = scan::find_angle_close(src, g, src.len())
+                {
+                    j = close + 1;
+                }
+                let mut params = (j, j);
                 while j < src.len() {
                     let Ok((k, e)) = scan::token(src, j) else {
                         break;
@@ -150,6 +157,13 @@ mod tests {
         assert_eq!(src[c[0].setup.0..c[0].setup.1].trim(), "let x = 1;");
         assert_eq!(c[1].name, "Other");
         assert!(src[c[1].setup.0..c[1].setup.1].trim().is_empty());
+    }
+
+    #[test]
+    fn params_of_a_generic_component() {
+        let c =
+            components("component List<F: Fn(u8) -> u8>(items: Vec<u8>, f: F) { view { <b/> } }");
+        assert_eq!(c[0].params, "items: Vec<u8>, f: F");
     }
 
     #[test]

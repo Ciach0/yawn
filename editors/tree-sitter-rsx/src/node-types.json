@@ -65,6 +65,10 @@
           "named": true
         },
         {
+          "type": "type_parameters",
+          "named": true
+        },
+        {
           "type": "view_block",
           "named": true
         }
@@ -459,6 +463,21 @@
       "types": [
         {
           "type": "css_content",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "type_parameters",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "rust_type",
           "named": true
         }
       ]
